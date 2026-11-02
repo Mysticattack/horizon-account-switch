@@ -28,7 +28,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.5.0";
+pub const VERSION: &str = "0.6.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -50,6 +50,10 @@ const MUTED: u32 = 0xFF_A0_A0_A0;
 const HERE: u32 = 0xFF_6E_D8_6E;
 /// Behind a row, for the frame a missing button sprite would leave empty.
 const ROW_FALLBACK: u32 = 0xFF_2B_2B_31;
+/// The line under the title.
+const SEPARATOR: u32 = 0x50_FF_FF_FF;
+/// A button's label under the pointer, as vanilla colours it.
+const HOVER_TEXT: u32 = 0xFF_FF_FF_A0;
 const CODE: u32 = 0xFF_FF_E0_70;
 
 /// A Microsoft sign-in the screen started: the code and where to enter it.
@@ -655,9 +659,16 @@ pub(super) fn draw(
     host.text(
         batch,
         TITLE,
-        [x + (width - title) / 2.0, y + 10.0],
+        [x + (width - title) / 2.0, y + 11.0],
         TITLE_TEXT,
         true,
+    );
+    // A line under the title, as much inside the frame as the buttons are.
+    let inset = logic::PAD_INNER;
+    host.fill(
+        batch,
+        [x + inset, y + 26.0, width - inset * 2.0, 1.0],
+        SEPARATOR,
     );
     let hovered = logic::hit(panel, rows.len(), screen.mouse);
     for (index, (action, label)) in rows.iter().enumerate() {
@@ -667,7 +678,7 @@ pub(super) fn draw(
                 .playing
                 .as_deref()
                 .is_some_and(|name| name.eq_ignore_ascii_case(&account.name))));
-        let sprite = if matches!(action, Action::Busy) || here {
+        let sprite = if matches!(action, Action::Busy) {
             BUTTON_OFF
         } else if hovered == Some(index) {
             BUTTON_HOVER
@@ -677,8 +688,13 @@ pub(super) fn draw(
         // A visible row even if the sprite is missing from the atlas.
         host.fill(batch, rect, ROW_FALLBACK);
         draw_button(host, batch, rect, sprite);
-        let text = if matches!(action, Action::Busy) || here {
+        // Vanilla turns a button's label yellow under the pointer.
+        let text = if matches!(action, Action::Busy) {
             MUTED
+        } else if here {
+            HERE
+        } else if hovered == Some(index) {
+            HOVER_TEXT
         } else {
             TITLE_TEXT
         };
@@ -706,17 +722,8 @@ pub(super) fn draw(
             HERE,
         );
     }
-    let hint = "Esc closes";
-    let hint_width = game.native_text_width(hint);
-    host.text(
-        batch,
-        hint,
-        [x + (width - hint_width) / 2.0, y + height - logic::FOOTER / 2.0 - 4.0],
-        MUTED,
-        true,
-    );
-    // Below the panel: the code of a running sign-in, or what happened last.
-    let mut line = y + height + 4.0;
+    // Below the panel: what happened last, a sign-in's code, and the hint.
+    let mut line = y + height + 8.0;
     if let Some(sign_in) = &view.sign_in {
         draw_line(host, batch, game, panel, &format!("Code: {}", sign_in.code), line, CODE);
         line += 12.0;
@@ -735,9 +742,20 @@ pub(super) fn draw(
             line,
             MUTED,
         );
+        line += 12.0;
     } else if let Some(status) = &view.status {
         draw_line(host, batch, game, panel, status, line, MUTED);
+        line += 12.0;
     }
+    draw_line(
+        host,
+        batch,
+        game,
+        panel,
+        "Esc closes · click a row to switch",
+        line + 2.0,
+        MUTED,
+    );
 }
 
 /// A line of text under the panel, centred with it.
