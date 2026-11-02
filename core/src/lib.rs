@@ -180,8 +180,11 @@ pub fn signed_in_name(text: &str) -> Option<String> {
 pub const HEADER: f32 = 28.0;
 /// The space below the last row: the hint line.
 pub const FOOTER: f32 = 24.0;
-/// A row's height, in GUI pixels.
-pub const ROW: f32 = 20.0;
+/// The distance from one row's top to the next: a vanilla button's 20 pixels
+/// and 4 between them.
+pub const ROW: f32 = 24.0;
+/// A row's drawn height: vanilla's button texture is 20 pixels tall.
+pub const BUTTON: f32 = 20.0;
 /// The panel's width, and the margin it keeps from the window's edge.
 const WIDTH: f32 = 240.0;
 const MARGIN: f32 = 20.0;
@@ -203,7 +206,7 @@ pub fn row(panel: [f32; 4], index: usize) -> [f32; 4] {
         panel[0] + PAD,
         panel[1] + HEADER + index as f32 * ROW,
         panel[2] - PAD * 2.0,
-        ROW - 2.0,
+        BUTTON,
     ]
 }
 

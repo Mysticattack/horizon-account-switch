@@ -28,7 +28,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.4.0";
+pub const VERSION: &str = "0.5.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -41,15 +41,15 @@ const TITLE: &str = "Account Switch";
 /// Frames to let the title come back before joining again.
 const RECONNECT_FRAMES: u32 = 2;
 
-// The screen's colours, ARGB as the game's `fill` and `text` take them.
-const SHADE: u32 = 0x60_00_00_00;
-const PANEL: u32 = 0xF2_16_16_1C;
-const BORDER: u32 = 0xFF_4A_4A_58;
+// The screen's colours, ARGB as the game's `fill` and `text` take them:
+// vanilla's tooltip background, and the text colours of its buttons.
+const SHADE: u32 = 0x80_10_10_10;
+const PANEL: u32 = 0xF0_10_00_10;
 const TITLE_TEXT: u32 = 0xFF_FF_FF_FF;
-const TEXT: u32 = 0xFF_E6_E6_E6;
-const MUTED: u32 = 0xFF_9A_9A_A6;
+const MUTED: u32 = 0xFF_A0_A0_A0;
 const HERE: u32 = 0xFF_6E_D8_6E;
-const HOVER: u32 = 0x40_FF_FF_FF;
+/// Behind a row, for the frame a missing button sprite would leave empty.
+const ROW_FALLBACK: u32 = 0xFF_2B_2B_31;
 const CODE: u32 = 0xFF_FF_E0_70;
 
 /// A Microsoft sign-in the screen started: the code and where to enter it.
@@ -556,7 +556,83 @@ pub(super) fn open(game: &mut crate::game::Game<'_>) {
     }
 }
 
-/// Draws the screen over the world (`native_screen_render_post`, API 78).
+/// The vanilla GUI sprites this screen is made of: buttons, and the tooltip's
+/// nine-slice frame around the panel.
+const BUTTON: &str = "gui/sprites/widget/button";
+const BUTTON_HOVER: &str = "gui/sprites/widget/button_highlighted";
+const BUTTON_OFF: &str = "gui/sprites/widget/button_disabled";
+const FRAME: &str = "gui/sprites/tooltip/frame";
+/// Vanilla's tooltip frame: 100x100 texels with a 10-pixel border that keeps
+/// its pixels while the middle stretches.
+const FRAME_SIZE: f32 = 100.0;
+const FRAME_BORDER: f32 = 10.0;
+/// A vanilla button's texture is 200x20 (`gui/sprites/widget/button`).
+const BUTTON_WIDTH: f32 = 200.0;
+const BUTTON_HEIGHT: f32 = 20.0;
+
+/// Draws `sprite` as the game draws a button: the texture's two halves, each
+/// stretched to half the width, so the rounded ends keep their shape.
+fn draw_button(
+    host: &dyn crate::mod_api::Host,
+    batch: &mut crate::hud::HudBatch,
+    rect: [f32; 4],
+    sprite: &str,
+) {
+    let [x, y, width, height] = rect;
+    let half = (width / 2.0).floor();
+    let middle = BUTTON_WIDTH / 2.0;
+    host.sprite(batch, sprite, [0.0, 0.0, middle, BUTTON_HEIGHT], [x, y, half, height]);
+    host.sprite(
+        batch,
+        sprite,
+        [middle, 0.0, middle, BUTTON_HEIGHT],
+        [x + half, y, width - half, height],
+    );
+}
+
+/// Draws vanilla's tooltip frame around `rect`: the four corners keep their
+/// 10 texels, the four edges and the middle stretch.
+fn draw_frame(
+    host: &dyn crate::mod_api::Host,
+    batch: &mut crate::hud::HudBatch,
+    rect: [f32; 4],
+) {
+    let [x, y, width, height] = rect;
+    let b = FRAME_BORDER;
+    let inner = FRAME_SIZE - b * 2.0;
+    let parts = [
+        ([0.0, 0.0, b, b], [x, y, b, b]),
+        ([FRAME_SIZE - b, 0.0, b, b], [x + width - b, y, b, b]),
+        ([0.0, FRAME_SIZE - b, b, b], [x, y + height - b, b, b]),
+        (
+            [FRAME_SIZE - b, FRAME_SIZE - b, b, b],
+            [x + width - b, y + height - b, b, b],
+        ),
+        ([b, 0.0, inner, b], [x + b, y, width - b * 2.0, b]),
+        ([b, FRAME_SIZE - b, inner, b], [x + b, y + height - b, width - b * 2.0, b]),
+        ([0.0, b, b, inner], [x, y + b, b, height - b * 2.0]),
+        (
+            [FRAME_SIZE - b, b, b, inner],
+            [x + width - b, y + b, b, height - b * 2.0],
+        ),
+    ];
+    for (src, dst) in parts {
+        host.sprite(batch, FRAME, src, dst);
+    }
+}
+
+/// The panel of the screen in GUI pixels: the same rectangle for drawing and
+/// for the clicks.
+fn panel_of(screen: &crate::mod_api::NativeScreenView<'_>, rows: usize) -> [f32; 4] {
+    logic::panel(
+        [screen.rect[0] + screen.rect[2], screen.rect[1] + screen.rect[3]],
+        rows,
+    )
+}
+
+/// Draws the screen over the world (`native_screen_render_post`, API 78), in
+/// vanilla's own sprites: a dimmed world, the tooltip frame around the panel,
+/// one button per row, and the labels centred on them.
 pub(super) fn draw(
     game: &crate::game::Game<'_>,
     batch: &mut crate::hud::HudBatch,
@@ -567,70 +643,115 @@ pub(super) fn draw(
     }
     let view = view();
     let rows = view.rows();
-    let window = [screen.rect[0] + screen.rect[2], screen.rect[1] + screen.rect[3]];
-    let panel = logic::panel(window, rows.len());
     let host: &dyn crate::mod_api::Host = game;
+    let window = [screen.rect[0] + screen.rect[2], screen.rect[1] + screen.rect[3]];
     host.fill(batch, [0.0, 0.0, window[0], window[1]], SHADE);
-    host.fill(batch, panel, PANEL);
-    // The border: four thin fills, the panel's edge.
+    let panel = panel_of(screen, rows.len());
     let [x, y, width, height] = panel;
-    host.fill(batch, [x, y, width, 1.0], BORDER);
-    host.fill(batch, [x, y + height - 1.0, width, 1.0], BORDER);
-    host.fill(batch, [x, y, 1.0, height], BORDER);
-    host.fill(batch, [x + width - 1.0, y, 1.0, height], BORDER);
-    host.text(batch, TITLE, [x + 8.0, y + 8.0], TITLE_TEXT, true);
+    // Vanilla's tooltip: its own background colour, then the frame over it.
+    host.fill(batch, panel, PANEL);
+    draw_frame(host, batch, panel);
+    let title = game.native_text_width(TITLE);
+    host.text(
+        batch,
+        TITLE,
+        [x + (width - title) / 2.0, y + 10.0],
+        TITLE_TEXT,
+        true,
+    );
     let hovered = logic::hit(panel, rows.len(), screen.mouse);
     for (index, (action, label)) in rows.iter().enumerate() {
         let rect = logic::row(panel, index);
-        if hovered == Some(index) {
-            host.fill(batch, rect, HOVER);
-        }
         let here = matches!(action, Action::Switch(at)
             if view.accounts.get(*at).is_some_and(|account| view
                 .playing
                 .as_deref()
                 .is_some_and(|name| name.eq_ignore_ascii_case(&account.name))));
-        let rgb = if here { HERE } else { TEXT };
-        host.text(batch, label, [rect[0] + 4.0, rect[1] + 6.0], rgb, true);
+        let sprite = if matches!(action, Action::Busy) || here {
+            BUTTON_OFF
+        } else if hovered == Some(index) {
+            BUTTON_HOVER
+        } else {
+            BUTTON
+        };
+        // A visible row even if the sprite is missing from the atlas.
+        host.fill(batch, rect, ROW_FALLBACK);
+        draw_button(host, batch, rect, sprite);
+        let text = if matches!(action, Action::Busy) || here {
+            MUTED
+        } else {
+            TITLE_TEXT
+        };
+        let width_of = game.native_text_width(label);
+        host.text(
+            batch,
+            label,
+            [rect[0] + (rect[2] - width_of) / 2.0, rect[1] + 6.0],
+            text,
+            true,
+        );
     }
-    // A switch in flight: a bar that fills and empties under its row.
+    // A switch in flight: a bar that fills and empties inside its button.
     if let Some((_, elapsed)) = &view.busy {
         let rect = logic::row(panel, 0);
         let fraction = 0.15 + 0.85 * (0.5 - 0.5 * (elapsed * 3.0).cos());
         host.fill(
             batch,
-            [rect[0] + 4.0, rect[1] + rect[3] - 4.0, (rect[2] - 8.0) * fraction, 2.0],
+            [
+                rect[0] + 4.0,
+                rect[1] + rect[3] - 5.0,
+                (rect[2] - 8.0) * fraction,
+                2.0,
+            ],
             HERE,
         );
     }
+    let hint = "Esc closes";
+    let hint_width = game.native_text_width(hint);
     host.text(
         batch,
-        "Esc closes",
-        [x + 8.0, y + height - logic::FOOTER / 2.0 - 4.0],
+        hint,
+        [x + (width - hint_width) / 2.0, y + height - logic::FOOTER / 2.0 - 4.0],
         MUTED,
         true,
     );
     // Below the panel: the code of a running sign-in, or what happened last.
-    let mut line = y + height + 6.0;
+    let mut line = y + height + 4.0;
     if let Some(sign_in) = &view.sign_in {
-        host.text(batch, &format!("Code: {}", sign_in.code), [x + 8.0, line], CODE, true);
+        draw_line(host, batch, game, panel, &format!("Code: {}", sign_in.code), line, CODE);
         line += 12.0;
-        host.text(batch, &sign_in.link, [x + 8.0, line], TEXT, true);
+        draw_line(host, batch, game, panel, &sign_in.link, line, TITLE_TEXT);
         line += 12.0;
-        host.text(
+        draw_line(
+            host,
             batch,
+            game,
+            panel,
             if sign_in.target.is_some() {
                 "enter it to sign that account in again"
             } else {
                 "enter it to add that account"
             },
-            [x + 8.0, line],
+            line,
             MUTED,
-            true,
         );
     } else if let Some(status) = &view.status {
-        host.text(batch, status, [x + 8.0, line], MUTED, true);
+        draw_line(host, batch, game, panel, status, line, MUTED);
     }
+}
+
+/// A line of text under the panel, centred with it.
+fn draw_line(
+    host: &dyn crate::mod_api::Host,
+    batch: &mut crate::hud::HudBatch,
+    game: &crate::game::Game<'_>,
+    panel: [f32; 4],
+    text: &str,
+    y: f32,
+    rgb: u32,
+) {
+    let width = game.native_text_width(text);
+    host.text(batch, text, [panel[0] + (panel[2] - width) / 2.0, y], rgb, true);
 }
 
 /// A click over the screen (`native_screen_mouse_button_pressed_pre`, API 80):
@@ -647,7 +768,7 @@ pub(super) fn clicked(
     }
     let view = view();
     let rows = view.rows();
-    let panel = logic::panel([screen.rect[2], screen.rect[3]], rows.len());
+    let panel = panel_of(screen, rows.len());
     let Some(index) = logic::hit(panel, rows.len(), screen.mouse) else {
         return;
     };
