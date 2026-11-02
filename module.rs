@@ -28,7 +28,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.12.0";
+pub const VERSION: &str = "0.13.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -113,6 +113,8 @@ struct State {
     map_ready: bool,
     /// The build said what it found, once.
     map_said: bool,
+    /// What the last build found, for the map screen's own line.
+    map_debug: String,
     /// The minimap's corner, as `logic::corner` counts them.
     corner: usize,
 }
@@ -135,11 +137,12 @@ static STATE: Mutex<State> = Mutex::new(State {
     scroll: 0,
     zoom: None,
     map_open: false,
-    map_zoom: 2,
+    map_zoom: 1,
     map_built: None,
     map_at: None,
     map_ready: false,
     map_said: false,
+    map_debug: String::new(),
     corner: 1,
 });
 
@@ -973,6 +976,7 @@ pub(super) fn refresh_map(game: &mut crate::game::Game<'_>) {
     let step = zoom as i32;
     let mut rgba = vec![0u8; (texels * texels * 4) as usize];
     let mut loaded = 0usize;
+    let mut debug = String::from("centre: not loaded");
     {
         let world = &game.world;
         let facts = game.res.facts();
@@ -981,14 +985,20 @@ pub(super) fn refresh_map(game: &mut crate::game::Game<'_>) {
             for column in 0..texels {
                 let x = center.0 + (column as i32 - half) * step;
                 let z = center.1 + (row as i32 - half) * step;
+                let centre = column == half as u32 && row == half as u32;
                 let pixel = if world.loaded(x, z) {
                     loaded += 1;
                     let surface = world.world_surface(x, z, is_air);
                     let block = world.block(x, surface - 1, z);
-                    let colour = facts
-                        .states
-                        .get(block.0 as usize)
-                        .map_or(0, |state| state.map_color);
+                    let entry = facts.states.get(block.0 as usize);
+                    let colour = entry.map_or(255, |state| state.map_color);
+                    if centre {
+                        debug = format!(
+                            "centre {x},{z} y{}: {} colour {colour} surface {surface}",
+                            surface - 1,
+                            entry.map_or("?", |state| &state.name)
+                        );
+                    }
                     map_pixel(colour, surface)
                 } else {
                     MAP_UNKNOWN
@@ -1022,6 +1032,16 @@ pub(super) fn refresh_map(game: &mut crate::game::Game<'_>) {
         state.map_ready = uploaded;
         state.map_built = Some((center, zoom));
         state.map_at = Some(std::time::Instant::now());
+        state.map_debug = format!(
+            "{loaded}/{} loaded · slot {} · image {} · {debug}",
+            texels as usize * texels as usize,
+            if game.gui.atlas.sprites.contains_key(MAP_SPRITE) {
+                "ok"
+            } else {
+                "missing"
+            },
+            if uploaded { "written" } else { "missing" }
+        );
         let first = !state.map_said;
         state.map_said = true;
         first
@@ -1148,6 +1168,11 @@ fn draw_map(
         MUTED,
         true,
     );
+    // What the last build found, so a dark map says why.
+    let debug = state().map_debug.clone();
+    if !debug.is_empty() {
+        host.text(batch, &debug, [8.0, window[1] - 22.0], CODE, true);
+    }
 }
 
 /// The key: open (or close) the switch screen (`native_key`'s hook).
@@ -1166,6 +1191,7 @@ pub(super) fn on_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool)
             state.map_open
         };
         if open {
+            state().map_built = None;
             game.native_mod_screen_open(ID);
         } else if game.native_mod_screen() == Some(ID) {
             game.native_mod_screen_close(ID);
