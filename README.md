@@ -12,9 +12,10 @@ horizon-launcher native-build horizon-account-switch --trust-native-code
 ```
 
 Der erste Build lädt Rust und kompiliert das Spiel (20–30 Minuten), später geht es schneller.
-Danach die Instanz starten, die er gebaut hat: **Options → Mods → Account Switch**, dort eine Zeile
-pro eingeloggtem Account anklicken (`Play as <Name>`), oder im Spiel die Wechsel-Taste drücken
-(F9, änderbar auf derselben Seite).
+Danach die Instanz starten, die er gebaut hat, und im Spiel **F9** drücken (Taste änderbar unter
+Options → Mods → Account Switch): es öffnet sich ein Fenster mit einer Zeile pro eingeloggtem
+Account — anklicken, fertig. Die Zeile **+ Add account** startet eine Microsoft-Anmeldung und zeigt
+den Code direkt im Fenster an; danach steht der neue Account in der Liste. **Esc** schließt.
 
 Voraussetzung: im Launcher sind mindestens zwei Microsoft-Accounts eingeloggt (einer davon mit
 Java Edition). Native Mods laufen mit deinen Rechten und sind nicht sandboxed — genau dafür ist
@@ -26,8 +27,10 @@ already running** and writes the read-once session file it hands over. This mod 
 installs it in place of the session the game started with, leaves the server and joins it again. From the next login
 on, the session service's join, the profile, the skins and the chat keys belong to the other account.
 
-- **Options → Mods → Account Switch** lists one row per signed-in account: click `Play as <name>`.
-- The **switch key** (F9 by default, set in the mod's page) switches to the next account in the launcher's order.
+- The **switch key** (F9 by default, set in the mod's page) opens the mod's own screen: one row per
+  signed-in account (`Play as <name>`, `Refresh list`), **+ Add account** for a Microsoft sign-in, and
+  the sign-in's code and link right there. Escape closes it.
+- **Options → Mods → Account Switch** carries the same rows as a settings page.
 - Chat says what is happening (`Account Switch: playing as …`, `joining <server> again`).
 
 Switching costs one reconnect (a second or two): the server sees a different player, so a fresh login is the only
@@ -62,6 +65,7 @@ open **Options → Mods → Account Switch**.
 | `set_current.rs`, `current.rs` | `auth::set_current` installs the session there, `auth::current` answers with it (cancellable HEAD: the original one-shot static is only used while no session is installed) |
 | `frame.rs` | once a frame: install a fetched session, leave the server, join it again |
 | `key.rs`, `mods.rs`, `settings.rs`, `click.rs` | the key, the Options → Mods row and its page |
+| `screen_render.rs`, `screen_click.rs` | the mod's own screen (`native_mod_screen_open`, API 111): drawn once a frame, its clicks taken |
 | `join.rs` | every server join keeps its address, for the switch to rejoin |
 | `core/` | the logic without the game: the launcher's JSON, which account is next, the page's rows (`cargo test`) |
 

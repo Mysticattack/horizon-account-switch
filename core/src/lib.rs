@@ -153,6 +153,58 @@ pub fn click(labels: usize, accounts: usize, button: usize) -> Click {
     Click::Nothing
 }
 
+/// The link and the code of the sign-in line the launcher prints on stderr:
+/// `To sign in, open https://www.microsoft.com/link in a browser and enter the
+/// code ABC-DEF`. None for every other line.
+pub fn parse_sign_in(line: &str) -> Option<(String, String)> {
+    let (before, code) = line.split_once(" and enter the code ")?;
+    let (_, rest) = before.rsplit_once("open ")?;
+    // The link ends at the first space (`… in a browser` follows it).
+    let link = rest.split_whitespace().next()?;
+    let code = code.trim();
+    (!link.is_empty() && !code.is_empty()).then(|| (link.to_owned(), code.to_owned()))
+}
+
+/// The space above the first row of the screen: the title.
+pub const HEADER: f32 = 28.0;
+/// The space below the last row: the hint line.
+pub const FOOTER: f32 = 24.0;
+/// A row's height, in GUI pixels.
+pub const ROW: f32 = 20.0;
+/// The panel's width, and the margin it keeps from the window's edge.
+const WIDTH: f32 = 240.0;
+const MARGIN: f32 = 20.0;
+const PAD: f32 = 8.0;
+
+/// The screen's panel in GUI pixels (`[x, y, width, height]`), centred in the
+/// window, tall enough for `rows` rows under the title.
+pub fn panel(window: [f32; 2], rows: usize) -> [f32; 4] {
+    let width = WIDTH.min((window[0] - MARGIN).max(120.0));
+    let height = HEADER + rows as f32 * ROW + FOOTER;
+    let x = ((window[0] - width) / 2.0).floor().max(0.0);
+    let y = ((window[1] - height) / 2.0).floor().max(0.0);
+    [x, y, width, height]
+}
+
+/// The rectangle of row `index` (`0` is the first under the title).
+pub fn row(panel: [f32; 4], index: usize) -> [f32; 4] {
+    [
+        panel[0] + PAD,
+        panel[1] + HEADER + index as f32 * ROW,
+        panel[2] - PAD * 2.0,
+        ROW - 2.0,
+    ]
+}
+
+/// The row under `mouse`, when `mouse` is inside the panel: `None` on the
+/// title, the hint, the gaps or outside it.
+pub fn hit(panel: [f32; 4], rows: usize, mouse: [f32; 2]) -> Option<usize> {
+    (0..rows).find(|index| {
+        let [x, y, width, height] = row(panel, *index);
+        mouse[0] >= x && mouse[0] < x + width && mouse[1] >= y && mouse[1] < y + height
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,15 +326,52 @@ mod tests {
         assert_eq!(click(2, 0, 7), Click::Nothing);
     }
 
-    impl Account {
-        fn default_account() -> Account {
-            Account {
-                name: String::new(),
-                uuid: String::new(),
-                selected: false,
-                state: String::new(),
-                message: String::new(),
-            }
-        }
+    #[test]
+    fn the_sign_in_line_gives_the_link_and_the_code() {
+        let line = "To sign in, open https://www.microsoft.com/link in a browser and enter the code K7Q4-2XP9M";
+        assert_eq!(
+            parse_sign_in(line),
+            Some((
+                "https://www.microsoft.com/link".to_owned(),
+                "K7Q4-2XP9M".to_owned()
+            ))
+        );
+        let again = "To sign Alex in again, open https://www.microsoft.com/link in a browser and enter the code QQ12";
+        assert_eq!(
+            parse_sign_in(again).map(|(_, code)| code),
+            Some("QQ12".to_owned())
+        );
+        assert_eq!(parse_sign_in("Signed in as Alex."), None);
+        assert_eq!(parse_sign_in(""), None);
+    }
+
+    #[test]
+    fn the_panel_is_centred_and_holds_its_rows() {
+        let p = panel([320.0, 240.0], 3);
+        assert_eq!(p[2], WIDTH);
+        assert_eq!(p[1], (240.0 - (HEADER + 3.0 * ROW + FOOTER)) / 2.0);
+        assert_eq!(p[0], (320.0 - WIDTH) / 2.0);
+        let last = row(p, 2);
+        assert!(last[1] + last[3] <= p[1] + p[3] - FOOTER + 0.001);
+        // A small window keeps its margin rather than overflowing.
+        let small = panel([100.0, 80.0], 4);
+        assert_eq!(small[2], 120.0);
+        assert_eq!(small[0], 0.0);
+    }
+
+    #[test]
+    fn a_row_is_hit_only_where_it_is() {
+        let p = panel([320.0, 240.0], 3);
+        let [x, y, width, height] = row(p, 1);
+        assert_eq!(hit(p, 3, [x + 1.0, y + 1.0]), Some(1));
+        assert_eq!(hit(p, 3, [x + width - 1.0, y + height - 1.0]), Some(1));
+        assert_eq!(hit(p, 3, [x + width, y + 1.0]), None);
+        assert_eq!(hit(p, 3, [x + 1.0, y + height]), None);
+        // The title above the first row and the gap between rows.
+        assert_eq!(hit(p, 3, [x + 1.0, p[1] + 2.0]), None);
+        assert_eq!(hit(p, 3, [x + 1.0, y + height + 0.5]), None);
+        // A row past the ones there are.
+        let [_, below, _, _] = row(p, 3);
+        assert_eq!(hit(p, 3, [x + 1.0, below + 1.0]), None);
     }
 }

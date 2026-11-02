@@ -1,6 +1,6 @@
 [mod]
 id = "account_switch"
-version = "0.1.0"
+version = "0.2.0"
 priority = 100
 
 # The commit this bundle was written and built against. `horizon-launcher
@@ -97,6 +97,30 @@ bindings = [
   { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
   { name = "mod_id", ty = "&str", value = "mod_id" },
   { name = "button", ty = "usize", value = "button" },
+]
+
+# The mod's own screen (API 111): drawn over the world, and its clicks.
+[[injection]]
+id = "screen_draw"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_render_post"
+helper = "screen_render.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "batch", ty = "&mut crate::hud::HudBatch", value = "&mut *batch" },
+  { name = "screen", ty = "&crate::mod_api::NativeScreenView<'_>", value = "&*screen" },
+]
+
+[[injection]]
+id = "screen_click"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_mouse_button_pressed_pre"
+helper = "screen_click.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "screen", ty = "&crate::mod_api::NativeScreenView<'_>", value = "&*screen" },
+  { name = "button", ty = "i32", value = "button" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
 ]
 
 # Every server join keeps its address, for the switch to join it again.
