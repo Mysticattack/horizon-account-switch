@@ -176,40 +176,33 @@ pub fn signed_in_name(text: &str) -> Option<String> {
     })
 }
 
-/// The space above the first row of the screen: the title and the line under it.
-pub const HEADER: f32 = 32.0;
-/// The space below the last row, inside the panel.
-pub const FOOTER: f32 = 12.0;
 /// The distance from one row's top to the next: a vanilla button's 20 pixels
 /// and 4 between them.
 pub const ROW: f32 = 24.0;
 /// A row's drawn height: vanilla's button texture is 20 pixels tall.
 pub const BUTTON: f32 = 20.0;
-/// The panel's width, and the margin it keeps from the window's edge.
-const WIDTH: f32 = 224.0;
+/// The button column's width: vanilla's buttons are 200 pixels wide.
+pub const WIDTH: f32 = 200.0;
 const MARGIN: f32 = 20.0;
-/// How far the rows keep from the panel's edge; the panel's own frame takes
-/// 10 of the 12, so a button sits 2 pixels inside it.
-pub const PAD_INNER: f32 = 12.0;
+/// The smallest room above the column: the title and the separator.
+pub const TITLE_SPACE: f32 = 46.0;
 
-/// The screen's panel in GUI pixels (`[x, y, width, height]`), centred in the
-/// window, tall enough for `rows` rows under the title.
+/// The button column in GUI pixels (`[x, y, width, height]`), centred in the
+/// window, `rows` buttons tall.
 pub fn panel(window: [f32; 2], rows: usize) -> [f32; 4] {
     let width = WIDTH.min((window[0] - MARGIN).max(120.0));
-    let height = HEADER + rows as f32 * ROW + FOOTER;
+    let height = (rows.max(1) as f32 * ROW - (ROW - BUTTON)).max(BUTTON);
     let x = ((window[0] - width) / 2.0).floor().max(0.0);
-    let y = ((window[1] - height) / 2.0).floor().max(0.0);
+    let y = ((window[1] - height) / 2.0)
+        .floor()
+        .max(TITLE_SPACE)
+        .min((window[1] - height).max(TITLE_SPACE));
     [x, y, width, height]
 }
 
-/// The rectangle of row `index` (`0` is the first under the title).
+/// The rectangle of row `index` (`0` is the first button).
 pub fn row(panel: [f32; 4], index: usize) -> [f32; 4] {
-    [
-        panel[0] + PAD_INNER,
-        panel[1] + HEADER + index as f32 * ROW,
-        panel[2] - PAD_INNER * 2.0,
-        BUTTON,
-    ]
+    [panel[0], panel[1] + index as f32 * ROW, panel[2], BUTTON]
 }
 
 /// The row under `mouse`, when `mouse` is inside the panel: `None` on the
@@ -383,14 +376,18 @@ mod tests {
     fn the_panel_is_centred_and_holds_its_rows() {
         let p = panel([320.0, 240.0], 3);
         assert_eq!(p[2], WIDTH);
-        assert_eq!(p[1], (240.0 - (HEADER + 3.0 * ROW + FOOTER)) / 2.0);
         assert_eq!(p[0], (320.0 - WIDTH) / 2.0);
+        // Three buttons: 20 + 4 + 20 + 4 + 20 = 68 tall, centred.
+        assert_eq!(p[3], 3.0 * ROW - (ROW - BUTTON));
+        assert_eq!(p[1], ((240.0 - p[3]) / 2.0).floor());
         let last = row(p, 2);
-        assert!(last[1] + last[3] <= p[1] + p[3] - FOOTER + 0.001);
-        // A small window keeps its margin rather than overflowing.
+        assert_eq!(last[1] + last[3], p[1] + p[3]);
+        // A small window keeps its margin rather than overflowing, and the
+        // column never starts above the title's room.
         let small = panel([100.0, 80.0], 4);
         assert_eq!(small[2], 120.0);
         assert_eq!(small[0], 0.0);
+        assert_eq!(small[1], TITLE_SPACE);
     }
 
     #[test]
@@ -401,8 +398,8 @@ mod tests {
         assert_eq!(hit(p, 3, [x + width - 1.0, y + height - 1.0]), Some(1));
         assert_eq!(hit(p, 3, [x + width, y + 1.0]), None);
         assert_eq!(hit(p, 3, [x + 1.0, y + height]), None);
-        // The title above the first row and the gap between rows.
-        assert_eq!(hit(p, 3, [x + 1.0, p[1] + 2.0]), None);
+        // Above the column (the title) and the gap between two rows.
+        assert_eq!(hit(p, 3, [x + 1.0, p[1] - 4.0]), None);
         assert_eq!(hit(p, 3, [x + 1.0, y + height + 0.5]), None);
         // A row past the ones there are.
         let [_, below, _, _] = row(p, 3);

@@ -72,7 +72,7 @@ open **Options → Mods → Account Switch**.
 | `set_current.rs`, `current.rs` | `auth::set_current` installs the session there, `auth::current` answers with it (cancellable HEAD: the original one-shot static is only used while no session is installed) |
 | `frame.rs` | once a frame: install a fetched session, leave the server, join it again |
 | `key.rs`, `mods.rs`, `settings.rs`, `click.rs` | the key, the Options → Mods row and its page |
-| `screen_render.rs`, `screen_click.rs` | the mod's own screen (`native_mod_screen_open`, API 111): drawn once a frame in vanilla's own sprites (`gui/sprites/widget/button`, `gui/sprites/tooltip/frame`), its clicks taken |
+| `screen_render.rs`, `screen_click.rs` | the mod's own screen (`native_mod_screen_open`, API 111): the vanilla menu look, drawn once a frame from the game's own art — tiled `gui/inworld_menu_background`, `gui/inworld_header_separator` and `gui/inworld_footer_separator`, buttons `gui/sprites/widget/button{,_highlighted,_disabled}` — with its clicks taken |
 | `join.rs` | every server join keeps its address, for the switch to rejoin |
 | `core/` | the logic without the game: the launcher's JSON, which account is next, the page's rows (`cargo test`) |
 

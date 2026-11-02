@@ -28,7 +28,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.6.0";
+pub const VERSION: &str = "0.7.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -44,14 +44,9 @@ const RECONNECT_FRAMES: u32 = 2;
 // The screen's colours, ARGB as the game's `fill` and `text` take them:
 // vanilla's tooltip background, and the text colours of its buttons.
 const SHADE: u32 = 0x80_10_10_10;
-const PANEL: u32 = 0xF0_10_00_10;
 const TITLE_TEXT: u32 = 0xFF_FF_FF_FF;
 const MUTED: u32 = 0xFF_A0_A0_A0;
 const HERE: u32 = 0xFF_6E_D8_6E;
-/// Behind a row, for the frame a missing button sprite would leave empty.
-const ROW_FALLBACK: u32 = 0xFF_2B_2B_31;
-/// The line under the title.
-const SEPARATOR: u32 = 0x50_FF_FF_FF;
 /// A button's label under the pointer, as vanilla colours it.
 const HOVER_TEXT: u32 = 0xFF_FF_FF_A0;
 const CODE: u32 = 0xFF_FF_E0_70;
@@ -560,16 +555,16 @@ pub(super) fn open(game: &mut crate::game::Game<'_>) {
     }
 }
 
-/// The vanilla GUI sprites this screen is made of: buttons, and the tooltip's
-/// nine-slice frame around the panel.
+// Vanilla's own menu art: the dark dirt every menu shows over a world, its
+// separators, and the buttons.
+const BACKGROUND: &str = "gui/inworld_menu_background";
+const HEADER_SEPARATOR: &str = "gui/inworld_header_separator";
+const FOOTER_SEPARATOR: &str = "gui/inworld_footer_separator";
 const BUTTON: &str = "gui/sprites/widget/button";
 const BUTTON_HOVER: &str = "gui/sprites/widget/button_highlighted";
 const BUTTON_OFF: &str = "gui/sprites/widget/button_disabled";
-const FRAME: &str = "gui/sprites/tooltip/frame";
-/// Vanilla's tooltip frame: 100x100 texels with a 10-pixel border that keeps
-/// its pixels while the middle stretches.
-const FRAME_SIZE: f32 = 100.0;
-const FRAME_BORDER: f32 = 10.0;
+/// The tiles' size: the game draws the menu background at 32 GUI pixels.
+const TILE: f32 = 32.0;
 /// A vanilla button's texture is 200x20 (`gui/sprites/widget/button`).
 const BUTTON_WIDTH: f32 = 200.0;
 const BUTTON_HEIGHT: f32 = 20.0;
@@ -594,39 +589,47 @@ fn draw_button(
     );
 }
 
-/// Draws vanilla's tooltip frame around `rect`: the four corners keep their
-/// 10 texels, the four edges and the middle stretch.
-fn draw_frame(
+/// Repeats `sprite` over `rect` in `cell`-sized tiles, the last row and column
+/// cut to fit, as vanilla tiles its menu background and separators. False when
+/// the atlas has no such sprite.
+fn draw_tiled(
     host: &dyn crate::mod_api::Host,
     batch: &mut crate::hud::HudBatch,
+    game: &crate::game::Game<'_>,
+    sprite: &str,
     rect: [f32; 4],
-) {
+    cell: [f32; 2],
+) -> bool {
+    let Some(size) = game.native_sprite_size(sprite) else {
+        return false;
+    };
     let [x, y, width, height] = rect;
-    let b = FRAME_BORDER;
-    let inner = FRAME_SIZE - b * 2.0;
-    let parts = [
-        ([0.0, 0.0, b, b], [x, y, b, b]),
-        ([FRAME_SIZE - b, 0.0, b, b], [x + width - b, y, b, b]),
-        ([0.0, FRAME_SIZE - b, b, b], [x, y + height - b, b, b]),
-        (
-            [FRAME_SIZE - b, FRAME_SIZE - b, b, b],
-            [x + width - b, y + height - b, b, b],
-        ),
-        ([b, 0.0, inner, b], [x + b, y, width - b * 2.0, b]),
-        ([b, FRAME_SIZE - b, inner, b], [x + b, y + height - b, width - b * 2.0, b]),
-        ([0.0, b, b, inner], [x, y + b, b, height - b * 2.0]),
-        (
-            [FRAME_SIZE - b, b, b, inner],
-            [x + width - b, y + b, b, height - b * 2.0],
-        ),
-    ];
-    for (src, dst) in parts {
-        host.sprite(batch, FRAME, src, dst);
+    if width <= 0.0 || height <= 0.0 || size[0] <= 0.0 || size[1] <= 0.0 {
+        return false;
     }
+    let columns = (width / cell[0]).ceil() as i32;
+    let rows = (height / cell[1]).ceil() as i32;
+    for row in 0..rows {
+        for column in 0..columns {
+            let left = column as f32 * cell[0];
+            let top = row as f32 * cell[1];
+            let used_x = (width - left).min(cell[0]);
+            let used_y = (height - top).min(cell[1]);
+            if used_x <= 0.0 || used_y <= 0.0 {
+                continue;
+            }
+            host.sprite(
+                batch,
+                sprite,
+                [0.0, 0.0, size[0] * used_x / cell[0], size[1] * used_y / cell[1]],
+                [x + left, y + top, used_x, used_y],
+            );
+        }
+    }
+    true
 }
 
-/// The panel of the screen in GUI pixels: the same rectangle for drawing and
-/// for the clicks.
+/// The button column in GUI pixels: the same rectangle for drawing and clicks.
 fn panel_of(screen: &crate::mod_api::NativeScreenView<'_>, rows: usize) -> [f32; 4] {
     logic::panel(
         [screen.rect[0] + screen.rect[2], screen.rect[1] + screen.rect[3]],
@@ -634,9 +637,10 @@ fn panel_of(screen: &crate::mod_api::NativeScreenView<'_>, rows: usize) -> [f32;
     )
 }
 
-/// Draws the screen over the world (`native_screen_render_post`, API 78), in
-/// vanilla's own sprites: a dimmed world, the tooltip frame around the panel,
-/// one button per row, and the labels centred on them.
+/// Draws the screen over the world (`native_screen_render_post`, API 78) the
+/// way vanilla draws a menu: the tiled dark dirt, the title over a header
+/// separator, one button per row, a footer separator, and the hint in the
+/// screen's bottom corner.
 pub(super) fn draw(
     game: &crate::game::Game<'_>,
     batch: &mut crate::hud::HudBatch,
@@ -649,26 +653,28 @@ pub(super) fn draw(
     let rows = view.rows();
     let host: &dyn crate::mod_api::Host = game;
     let window = [screen.rect[0] + screen.rect[2], screen.rect[1] + screen.rect[3]];
-    host.fill(batch, [0.0, 0.0, window[0], window[1]], SHADE);
+    let whole = [0.0, 0.0, window[0], window[1]];
+    if !draw_tiled(host, batch, game, BACKGROUND, whole, [TILE, TILE]) {
+        host.fill(batch, whole, SHADE);
+    }
     let panel = panel_of(screen, rows.len());
     let [x, y, width, height] = panel;
-    // Vanilla's tooltip: its own background colour, then the frame over it.
-    host.fill(batch, panel, PANEL);
-    draw_frame(host, batch, panel);
+    // The title, and the header separator under it, as on every vanilla menu.
     let title = game.native_text_width(TITLE);
     host.text(
         batch,
         TITLE,
-        [x + (width - title) / 2.0, y + 11.0],
+        [x + (width - title) / 2.0, y - 26.0],
         TITLE_TEXT,
         true,
     );
-    // A line under the title, as much inside the frame as the buttons are.
-    let inset = logic::PAD_INNER;
-    host.fill(
+    draw_tiled(
+        host,
         batch,
-        [x + inset, y + 26.0, width - inset * 2.0, 1.0],
-        SEPARATOR,
+        game,
+        HEADER_SEPARATOR,
+        [0.0, y - 8.0, window[0], 2.0],
+        [TILE, 2.0],
     );
     let hovered = logic::hit(panel, rows.len(), screen.mouse);
     for (index, (action, label)) in rows.iter().enumerate() {
@@ -685,8 +691,6 @@ pub(super) fn draw(
         } else {
             BUTTON
         };
-        // A visible row even if the sprite is missing from the atlas.
-        host.fill(batch, rect, ROW_FALLBACK);
         draw_button(host, batch, rect, sprite);
         // Vanilla turns a button's label yellow under the pointer.
         let text = if matches!(action, Action::Busy) {
@@ -707,7 +711,7 @@ pub(super) fn draw(
             true,
         );
     }
-    // A switch in flight: a bar that fills and empties inside its button.
+    // A switch in flight: a bar inside its button.
     if let Some((_, elapsed)) = &view.busy {
         let rect = logic::row(panel, 0);
         let fraction = 0.15 + 0.85 * (0.5 - 0.5 * (elapsed * 3.0).cos());
@@ -722,8 +726,17 @@ pub(super) fn draw(
             HERE,
         );
     }
-    // Below the panel: what happened last, a sign-in's code, and the hint.
-    let mut line = y + height + 8.0;
+    // The footer separator, then what happened last or a sign-in's code.
+    let footer = y + height + 12.0;
+    draw_tiled(
+        host,
+        batch,
+        game,
+        FOOTER_SEPARATOR,
+        [0.0, footer, window[0], 2.0],
+        [TILE, 2.0],
+    );
+    let mut line = footer + 8.0;
     if let Some(sign_in) = &view.sign_in {
         draw_line(host, batch, game, panel, &format!("Code: {}", sign_in.code), line, CODE);
         line += 12.0;
@@ -742,23 +755,21 @@ pub(super) fn draw(
             line,
             MUTED,
         );
-        line += 12.0;
     } else if let Some(status) = &view.status {
         draw_line(host, batch, game, panel, status, line, MUTED);
-        line += 12.0;
     }
-    draw_line(
-        host,
+    let hint = "Esc closes · click a row to switch";
+    let hint_width = game.native_text_width(hint);
+    host.text(
         batch,
-        game,
-        panel,
-        "Esc closes · click a row to switch",
-        line + 2.0,
+        hint,
+        [x + (width - hint_width) / 2.0, window[1] - 18.0],
         MUTED,
+        true,
     );
 }
 
-/// A line of text under the panel, centred with it.
+/// A line of text under the column, centred with it.
 fn draw_line(
     host: &dyn crate::mod_api::Host,
     batch: &mut crate::hud::HudBatch,
