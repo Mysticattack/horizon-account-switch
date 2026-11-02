@@ -193,6 +193,22 @@ pub const BAR: f32 = 8.0;
 /// The margin the panel keeps from the window's edge.
 pub const MARGIN: f32 = 12.0;
 
+/// The zoom the key starts at, how far the wheel takes it, and its limits.
+pub const ZOOM_START: f32 = 4.0;
+pub const ZOOM_MIN: f32 = 1.25;
+pub const ZOOM_MAX: f32 = 10.0;
+pub const ZOOM_STEP: f32 = 1.25;
+
+/// The zoom after `steps` wheel steps while the key is held.
+pub fn zoomed(factor: f32, steps: f32) -> f32 {
+    (factor * ZOOM_STEP.powf(steps)).clamp(ZOOM_MIN, ZOOM_MAX)
+}
+
+/// How much slower the view turns while zoomed in, as the spyglass does.
+pub fn zoom_turn(factor: f32) -> f32 {
+    1.0 / factor.max(1.0)
+}
+
 /// How many rows the window can show at once: as many as fit between the
 /// margins, with the title bar and the hint line.
 pub fn visible_rows(window: [f32; 2]) -> usize {
@@ -418,6 +434,17 @@ mod tests {
         assert!(p[1] + p[3] <= window[1] - MARGIN + 0.5);
         // A narrow window still gets a usable panel.
         assert!(panel([200.0, 203.0], 3)[2] >= 180.0);
+    }
+
+    #[test]
+    fn the_wheel_zooms_between_the_limits() {
+        assert_eq!(zoomed(ZOOM_START, 0.0), ZOOM_START);
+        assert!(zoomed(ZOOM_START, 1.0) > ZOOM_START);
+        assert!(zoomed(ZOOM_START, -1.0) < ZOOM_START);
+        assert_eq!(zoomed(ZOOM_START, 40.0), ZOOM_MAX);
+        assert_eq!(zoomed(ZOOM_START, -40.0), ZOOM_MIN);
+        assert_eq!(zoom_turn(1.0), 1.0);
+        assert_eq!(zoom_turn(4.0), 0.25);
     }
 
     #[test]

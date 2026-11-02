@@ -43,6 +43,16 @@ on, the session service's join, the profile, the skins and the chat keys belong 
 Switching costs one reconnect (a second or two): the server sees a different player, so a fresh login is the only
 honest way. You can't play two accounts in one game.
 
+## Zoom
+
+The mod also carries a zoom, like OptiFine's: hold the zoom key (C by default, set on the mod's page) to
+zoom in 4x, and turn the wheel while holding it to change how far (1.25x to 10x). Turning slows down with
+it, as the spyglass does. It fills the game's own `native_zoom`, so the camera, smoothing and FOV easing are
+Horizon's, not a copy of them.
+
+**With Horizon's official Zoom mod installed, remove one of the two**: both answer `native_zoom`, and the
+first one to answer wins, so the keys would disagree about what they do.
+
 ## What it needs
 
 - Horizon with native-mod support (the launcher that builds native mods), Minecraft 26.3.

@@ -1,6 +1,6 @@
 [mod]
 id = "account_switch"
-version = "0.8.0"
+version = "0.9.0"
 priority = 100
 
 # The commit this bundle was written and built against. `horizon-launcher
@@ -134,6 +134,25 @@ bindings = [
   { name = "screen", ty = "&crate::mod_api::NativeScreenView<'_>", value = "&*screen" },
   { name = "scroll", ty = "[f64; 2]", value = "scroll" },
   { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+# The zoom key: the game's own zoom, held like OptiFine's.
+[[injection]]
+id = "zoom"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_zoom"
+helper = "zoom.rs"
+bindings = [{ name = "zoom", ty = "&mut Option<crate::game::native_hooks::NativeZoom>", value = "&mut *zoom" }]
+
+# The wheel while zooming changes how far.
+[[injection]]
+id = "zoom_wheel"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_wheel"
+helper = "zoom_wheel.rs"
+bindings = [
+  { name = "steps", ty = "f32", value = "steps" },
+  { name = "claimed", ty = "&mut bool", value = "&mut *claimed" },
 ]
 
 # Every server join keeps its address, for the switch to join it again.

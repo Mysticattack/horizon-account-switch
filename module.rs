@@ -28,14 +28,17 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.8.0";
+pub const VERSION: &str = "0.9.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
-     again as the other account.";
+     again as the other account. Hold the zoom key to zoom in; the wheel changes how far.";
 /// The key's name and its default: nothing vanilla uses.
 pub const KEY: &str = "switch";
 pub const DEFAULT_KEY: &str = "key.keyboard.f9";
+/// The zoom key: held, it zooms in; the wheel changes how far.
+pub const ZOOM_KEY: &str = "zoom";
+pub const ZOOM_DEFAULT: &str = "key.keyboard.c";
 /// The screen's title.
 const TITLE: &str = "Account Switch";
 /// Frames to let the title come back before joining again.
@@ -94,6 +97,8 @@ struct State {
     /// The first row the screen shows: the list scrolls when the accounts
     /// don't fit.
     scroll: usize,
+    /// Held zoom factor while the zoom key is down.
+    zoom: Option<f32>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
@@ -112,6 +117,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     copy: None,
     busy: None,
     scroll: 0,
+    zoom: None,
 });
 
 /// Messages for the next frame: the launcher threads can't reach the game.
@@ -855,10 +861,18 @@ pub(super) fn wheel(
 
 /// The key: open (or close) the switch screen (`native_key`'s hook).
 pub(super) fn on_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
-    if !pressed || !game.native_window() {
+    if !game.native_window() {
         return;
     }
-    if key != game.native_mod_key(ID, KEY, DEFAULT_KEY) {
+    // The zoom key: held while playing, as OptiFine's zoom.
+    if key == game.native_mod_key(ID, ZOOM_KEY, ZOOM_DEFAULT) {
+        if pressed && !game.native_playing() {
+            return;
+        }
+        state().zoom = pressed.then_some(logic::ZOOM_START);
+        return;
+    }
+    if !pressed || key != game.native_mod_key(ID, KEY, DEFAULT_KEY) {
         return;
     }
     if game.native_mod_screen() == Some(ID) {
@@ -868,17 +882,53 @@ pub(super) fn on_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool)
     open(game);
 }
 
+/// The zoom in effect, unless another mod's came first
+/// (`native_zoom`'s hook).
+pub(super) fn zoom_view(zoom: &mut Option<crate::game::native_hooks::NativeZoom>) {
+    if zoom.is_some() {
+        return;
+    }
+    let Some(factor) = state().zoom else {
+        return;
+    };
+    *zoom = Some(crate::game::native_hooks::NativeZoom {
+        factor,
+        smooth: true,
+        turn: logic::zoom_turn(factor),
+    });
+}
+
+/// The wheel while the zoom key is held: it changes how far
+/// (`native_wheel`'s hook). Claimed, so the hotbar stays put.
+pub(super) fn zoom_wheel(steps: f32, claimed: &mut bool) {
+    if *claimed {
+        return;
+    }
+    let mut state = state();
+    if let Some(factor) = state.zoom {
+        state.zoom = Some(logic::zoomed(factor, steps));
+        *claimed = true;
+    }
+}
+
 /// The mod's row in Options > Mods (`native_mods`' hook).
 pub(super) fn listed(mods: &mut Vec<crate::game::native_hooks::NativeMod>) {
     mods.push(crate::game::native_hooks::NativeMod {
         id: ID.to_owned(),
         title: format!("Account Switch {VERSION}"),
         description: DESCRIPTION.to_owned(),
-        keys: vec![[
-            KEY.to_owned(),
-            "Open the account switcher".to_owned(),
-            DEFAULT_KEY.to_owned(),
-        ]],
+        keys: vec![
+            [
+                KEY.to_owned(),
+                "Open the account switcher".to_owned(),
+                DEFAULT_KEY.to_owned(),
+            ],
+            [
+                ZOOM_KEY.to_owned(),
+                "Zoom (hold)".to_owned(),
+                ZOOM_DEFAULT.to_owned(),
+            ],
+        ],
     });
 }
 
