@@ -28,7 +28,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.15.0";
+pub const VERSION: &str = "0.16.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -105,19 +105,22 @@ struct State {
     zoom: Option<f32>,
     /// The map key was pressed: the screen shows the world map.
     map_open: bool,
-    /// Blocks per map texel, and the image built for which centre and zoom.
+    /// Blocks per world map cell, and when the world map was built.
     map_zoom: u32,
-    map_built: Option<((i32, i32), u32)>,
-    map_at: Option<std::time::Instant>,
-    /// The texture holds a built map.
-    map_ready: bool,
+    big_built: Option<((i32, i32), u32)>,
+    big_at: Option<std::time::Instant>,
+    /// The world map's colours, row by row (`logic::BIG` squared): its own
+    /// sampling, not an enlargement of the minimap.
+    big_grid: Vec<u32>,
+    /// The minimap's colours, row by row (`logic::MINI` squared), and the
+    /// centre they were sampled around: a small live grid, rebuilt as you walk.
+    mini_grid: Vec<u32>,
+    mini_center: Option<(i32, i32)>,
+    mini_at: Option<std::time::Instant>,
     /// The build said what it found, once.
     map_said: bool,
     /// What the last build found, for the map screen's own line.
     map_debug: String,
-    /// The built map as packed colours, row by row (`TEXELS` squared). Drawn as
-    /// one filled cell per texel: a bundle has no image slot it may write.
-    map_grid: Vec<u32>,
     /// The minimap's corner, as `logic::corner` counts them.
     corner: usize,
 }
@@ -141,12 +144,14 @@ static STATE: Mutex<State> = Mutex::new(State {
     zoom: None,
     map_open: false,
     map_zoom: 1,
-    map_built: None,
-    map_at: None,
-    map_ready: false,
+    big_built: None,
+    big_at: None,
+    big_grid: Vec::new(),
+    mini_grid: Vec::new(),
+    mini_center: None,
+    mini_at: None,
     map_said: false,
     map_debug: String::new(),
-    map_grid: Vec::new(),
     corner: 1,
 });
 
@@ -413,7 +418,11 @@ pub(super) fn pump(game: &mut crate::game::Game<'_>) {
         }
     }
     if game.native_playing() {
-        refresh_map(game);
+        refresh_minimap(game);
+    }
+    let map_open = state().map_open;
+    if map_open {
+        refresh_big(game);
     }
     let first = {
         let mut state = state();
@@ -941,74 +950,76 @@ fn map_pixel(colour: u8, height: i32) -> u32 {
     0xFF00_0000 | (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
-/// Whether the built map no longer matches where the player is and how far out
-/// they look.
-fn map_stale(center: (i32, i32), zoom: u32) -> bool {
-    let state = state();
-    let (Some((built, built_zoom)), Some(at)) = (&state.map_built, state.map_at) else {
-        return true;
-    };
-    let reach = 8 * zoom.max(1) as i32;
-    *built_zoom != zoom
-        || at.elapsed().as_secs() > 10
-        || (built.0 - center.0).abs() >= reach
-        || (built.1 - center.1).abs() >= reach
-}
-
-/// Builds the map around the player and uploads it, when it is stale: the
-/// surface of every column within reach, in vanilla's map colours
-/// (`native_mod_image`, API 355).
-pub(super) fn refresh_map(game: &mut crate::game::Game<'_>) {
-    let Some(position) = game.player.as_ref().map(|player| player.position) else {
-        return;
-    };
-    let center = (position.x.floor() as i32, position.z.floor() as i32);
-    let zoom = state().map_zoom.max(1);
-    if !map_stale(center, zoom) {
-        return;
-    }
-    let texels = logic::TEXELS;
-    let half = (texels / 2) as i32;
-    let step = zoom as i32;
-    let mut grid = vec![MAP_UNKNOWN_FILL; (texels * texels) as usize];
+/// The surface colours of `cells` by `cells` columns around `center`, one cell
+/// every `step` blocks: packed opaque colours, how many columns were loaded,
+/// and what the centre column holds.
+fn sample(
+    game: &crate::game::Game<'_>,
+    center: (i32, i32),
+    step: i32,
+    cells: u32,
+) -> (Vec<u32>, usize, String) {
+    let half = (cells / 2) as i32;
+    let mut grid = vec![MAP_UNKNOWN_FILL; (cells * cells) as usize];
     let mut loaded = 0usize;
     let mut debug = String::from("centre: not loaded");
+    let world = &game.world;
+    let facts = game.res.facts();
+    let is_air = |block| facts.is_air(block);
+    for row in 0..cells {
+        for column in 0..cells {
+            let x = center.0 + (column as i32 - half) * step;
+            let z = center.1 + (row as i32 - half) * step;
+            if !world.loaded(x, z) {
+                continue;
+            }
+            loaded += 1;
+            let surface = world.world_surface(x, z, is_air);
+            let block = world.block(x, surface - 1, z);
+            let entry = facts.states.get(block.0 as usize);
+            let colour = entry.map_or(255, |state| state.map_color);
+            if column == half as u32 && row == half as u32 {
+                debug = format!(
+                    "centre {x},{z} y{}: {} colour {colour} surface {surface}",
+                    surface - 1,
+                    entry.map_or("?", |state| &state.name)
+                );
+            }
+            grid[(row * cells + column) as usize] = map_pixel(colour, surface);
+        }
+    }
+    (grid, loaded, debug)
+}
+
+/// The player's column, to the block.
+fn player_center(game: &crate::game::Game<'_>) -> Option<(i32, i32)> {
+    let position = game.player.as_ref()?.position;
+    Some((position.x.floor() as i32, position.z.floor() as i32))
+}
+
+/// Rebuilds the minimap as the player walks: one block per cell, live, at most
+/// eight times a second and only when the centre moved a block.
+pub(super) fn refresh_minimap(game: &mut crate::game::Game<'_>) {
+    let Some(center) = player_center(game) else {
+        return;
+    };
     {
-        let world = &game.world;
-        let facts = game.res.facts();
-        let is_air = |block| facts.is_air(block);
-        for row in 0..texels {
-            for column in 0..texels {
-                let x = center.0 + (column as i32 - half) * step;
-                let z = center.1 + (row as i32 - half) * step;
-                let at = (row * texels + column) as usize;
-                if !world.loaded(x, z) {
-                    continue;
-                }
-                loaded += 1;
-                let surface = world.world_surface(x, z, is_air);
-                let block = world.block(x, surface - 1, z);
-                let entry = facts.states.get(block.0 as usize);
-                let colour = entry.map_or(255, |state| state.map_color);
-                if column == half as u32 && row == half as u32 {
-                    debug = format!(
-                        "centre {x},{z} y{}: {} colour {colour} surface {surface}",
-                        surface - 1,
-                        entry.map_or("?", |state| &state.name)
-                    );
-                }
-                grid[at] = map_pixel(colour, surface);
+        let state = state();
+        if let (Some(built), Some(at)) = (state.mini_center, state.mini_at) {
+            let calm = built.0 == center.0 && built.1 == center.1;
+            if calm || at.elapsed().as_millis() < 120 {
+                return;
             }
         }
     }
+    let (grid, loaded, debug) = sample(game, center, 1, logic::MINI);
+    let total = (logic::MINI * logic::MINI) as usize;
     let mut state = state();
-    state.map_grid = grid;
-    state.map_ready = true;
-    state.map_built = Some((center, zoom));
-    state.map_at = Some(std::time::Instant::now());
+    state.mini_grid = grid;
+    state.mini_center = Some(center);
+    state.mini_at = Some(std::time::Instant::now());
     state.map_debug = format!(
-        "{loaded}/{} loaded · chunks {} · {debug}",
-        texels as usize * texels as usize,
+        "minimap {loaded}/{total} loaded · chunks {} · {debug}",
         game.world.chunks.len()
     );
     let first = !state.map_said;
@@ -1017,10 +1028,40 @@ pub(super) fn refresh_map(game: &mut crate::game::Game<'_>) {
     if first {
         // Once, so a map that stays dark says why.
         tell(format!(
-            "Account Switch map: {loaded} of {} columns loaded",
-            texels as usize * texels as usize
+            "Account Switch map: {loaded} of {total} columns loaded"
         ));
     }
+}
+
+/// Rebuilds the world map while it is open: its own, finer sampling (four
+/// times the minimap's cells), so it is not the minimap drawn larger.
+pub(super) fn refresh_big(game: &mut crate::game::Game<'_>) {
+    let Some(center) = player_center(game) else {
+        return;
+    };
+    let zoom = state().map_zoom.max(1);
+    {
+        let state = state();
+        let stale = match (&state.big_built, state.big_at) {
+            (Some((built, built_zoom)), Some(at)) => {
+                *built_zoom != zoom
+                    || at.elapsed().as_millis() > 1200
+                    || (built.0 - center.0).abs() >= 4 * zoom as i32
+                    || (built.1 - center.1).abs() >= 4 * zoom as i32
+            }
+            _ => true,
+        };
+        if !stale {
+            return;
+        }
+    }
+    let (grid, loaded, debug) = sample(game, center, zoom as i32, logic::BIG);
+    let total = (logic::BIG * logic::BIG) as usize;
+    let mut state = state();
+    state.big_grid = grid;
+    state.big_built = Some((center, zoom));
+    state.big_at = Some(std::time::Instant::now());
+    state.map_debug = format!("world map {loaded}/{total} · {debug}");
 }
 
 /// One filled cell per texel of `grid` (`texels` squared), inside `area`: the
@@ -1075,27 +1116,24 @@ pub(super) fn hud_post(
         return;
     }
     let state = state();
-    if !state.map_ready || state.map_grid.is_empty() {
+    if state.mini_grid.is_empty() {
         return;
     }
     let corner = state.corner;
     let host: &dyn crate::mod_api::Host = game;
     let side = logic::MINIMAP;
     let at = logic::minimap_at([batch.width, batch.height], corner, side);
-    let texels = logic::TEXELS;
-    let half = (texels / 2) as i32;
-    let reach = (logic::MINIMAP_TEXELS as u32 / 2) as i32;
-    let (first_column, last_column) = ((half - reach) as u32, (half + reach) as u32);
+    let cells = logic::MINI;
     draw_grid(
         host,
         batch,
         [at[0], at[1], side, side],
-        &state.map_grid,
-        texels,
-        (half - reach) as u32,
-        (half + reach) as u32,
-        first_column,
-        last_column,
+        &state.mini_grid,
+        cells,
+        0,
+        cells,
+        0,
+        cells,
     );
     draw_outline(host, batch, [at[0] - 2.0, at[1] - 2.0, side + 4.0, side + 4.0], 1.0, 0xFF10_10_14);
     draw_outline(host, batch, [at[0] - 1.0, at[1] - 1.0, side + 2.0, side + 2.0], 1.0, 0xFF5A_5A_6A);
@@ -1135,11 +1173,11 @@ fn draw_map(
     let map = [(window[0] - side) / 2.0, (window[1] - side) / 2.0, side, side];
     {
         let state = state();
-        if state.map_ready && !state.map_grid.is_empty() {
-            let texels = logic::TEXELS;
-            draw_grid(host, batch, map, &state.map_grid, texels, 0, texels, 0, texels);
-        } else {
+        if state.big_grid.is_empty() {
             host.fill(batch, map, MAP_UNKNOWN_FILL);
+        } else {
+            let cells = logic::BIG;
+            draw_grid(host, batch, map, &state.big_grid, cells, 0, cells, 0, cells);
         }
     }
     draw_outline(host, batch, [map[0] - 2.0, map[1] - 2.0, map[2] + 4.0, map[3] + 4.0], 1.0, 0xFF10_10_14);
@@ -1157,7 +1195,7 @@ fn draw_map(
     );
     let zoom = state().map_zoom;
     let title = format!(
-        "Map · {} blocks across · {} per pixel",
+        "Map · {} blocks across · {} per cell",
         logic::map_blocks(zoom),
         zoom
     );
@@ -1201,7 +1239,10 @@ pub(super) fn on_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool)
             state.map_open
         };
         if open {
-            state().map_built = None;
+            {
+                let mut state = state();
+                state.big_built = None;
+            }
             game.native_mod_screen_open(ID);
         } else if game.native_mod_screen() == Some(ID) {
             game.native_mod_screen_close(ID);

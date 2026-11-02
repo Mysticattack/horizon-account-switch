@@ -196,9 +196,14 @@ pub const MARGIN: f32 = 12.0;
 /// The map texture's side in texels: the game's minimap slot is 128 square, so
 /// `native_mod_image` is not needed at all — the map goes into that slot.
 pub const TEXELS: u32 = 128;
+/// The world map's cells per side: four times the minimap's, so it is sampled
+/// sharper instead of being the minimap drawn larger.
+pub const BIG: u32 = 160;
+/// The minimap's cells per side, at one block per cell.
+pub const MINI: u32 = 64;
 /// The corner minimap's side in GUI pixels, and the texels it shows of the map.
 pub const MINIMAP: f32 = 72.0;
-pub const MINIMAP_TEXELS: f32 = 64.0;
+pub const MINIMAP_TEXELS: f32 = MINI as f32;
 /// The closest and furthest a texel can be, in blocks.
 pub const MAP_ZOOM_MIN: u32 = 1;
 pub const MAP_ZOOM_MAX: u32 = 32;

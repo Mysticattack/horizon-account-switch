@@ -55,18 +55,18 @@ first one to answer wins, so the keys would disagree about what they do.
 
 ## Minimap and world map
 
-Both are drawn from the mod's own map image: the surface height of every column in reach, in vanilla's map
-colours (`MAP_COLORS`), written into the game's own minimap slot (`horizon/minimap`, 128 square) and
-refreshed when the player moved 8 texels, the zoom changed or 10 seconds passed. `native_mod_image` is not
-used: its image slot only exists when a *trait* mod is loaded, and a mixin bundle never is one.
+Both sample the surface height of the columns in reach and colour them with vanilla's map colours
+(`MAP_COLORS`). Each cell is drawn as one filled rectangle with the host's own fill call, because a
+mixin bundle never gets the image slot `native_mod_image` writes (that slot exists only while a trait
+mod is loaded).
 
-- **Minimap**: the image's middle 64 texels, 72 GUI pixels, in a corner (top right by default; the mod's
-  page moves it), with a two-pixel frame and a red dot for the player. Drawn after the hotbar's HUD layer
-  (`native_gui_layer_post`, API 139), so it does not replace or double the game's own minimap — the game's
-  is off while this mod is installed, because the mod no longer answers `native_minimap`.
-- **World map** (`M`): the whole 256-texel image, as large as the window allows, with the player in the
-  middle and the scale in blocks per pixel. The wheel zooms out and in, 1 to 16 blocks to a texel — a whole
-  4096 blocks across at the farthest. Only loaded chunks have colours; the rest is dark.
+- **Minimap**: `logic::MINI` (64) cells at one block per cell, 72 GUI pixels, live — rebuilt as the
+  player walks, at most eight times a second, when the centre moved a block. Drawn in the
+  `minecraft:hotbar` HUD layer (`native_gui_layer_post`, API 139) with a two-pixel frame and the
+  player in the middle, in a corner (top right by default; `C` cycles).
+- **World map** (`M`): its own, finer grid — `logic::BIG` (160) cells, 2.5 times the minimap's detail,
+  with its own zoom 1 to 32 blocks per cell, rebuilt while it is open (every 1.2 s or after four cells
+  of movement). The line at the bottom says how many columns were loaded and what the centre block is.
 
 With Horizon's official Minimap mod there is no clash any more: that one answers `native_minimap` and draws
 the game's minimap, this one draws its own image over the HUD.
