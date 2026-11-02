@@ -28,7 +28,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.14.0";
+pub const VERSION: &str = "0.15.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -115,6 +115,9 @@ struct State {
     map_said: bool,
     /// What the last build found, for the map screen's own line.
     map_debug: String,
+    /// The built map as packed colours, row by row (`TEXELS` squared). Drawn as
+    /// one filled cell per texel: a bundle has no image slot it may write.
+    map_grid: Vec<u32>,
     /// The minimap's corner, as `logic::corner` counts them.
     corner: usize,
 }
@@ -143,6 +146,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     map_ready: false,
     map_said: false,
     map_debug: String::new(),
+    map_grid: Vec::new(),
     corner: 1,
 });
 
@@ -918,31 +922,23 @@ pub(super) fn wheel(
     *canceled = true;
 }
 
-/// The map texture's sprite: the game's own minimap slot. A bundle's
-/// `native_mod_image` needs a *trait* mod's image slot, which a mixin bundle
-/// never gets; this slot is always there, so the map is written into it.
-const MAP_SPRITE: &str = crate::hud::MINIMAP_SPRITE;
-/// What the map shows where no chunk is loaded (as an image pixel, and as a
-/// fill for the frame before the first image is built).
-const MAP_UNKNOWN: [u8; 4] = [24, 24, 28, 255];
+/// What the map shows where no chunk is loaded.
 const MAP_UNKNOWN_FILL: u32 = 0xFF_18_18_1C;
 
-/// One map pixel from a block's vanilla map colour id and its height.
-fn map_pixel(colour: u8, height: i32) -> [u8; 4] {
-    if colour == 0 {
-        return MAP_UNKNOWN;
-    }
+/// One map pixel from a block's vanilla map colour id and its height, as a
+/// packed opaque colour.
+fn map_pixel(colour: u8, height: i32) -> u32 {
     let packed = crate::blocks::MAP_COLORS
         .get(colour as usize)
         .copied()
         .unwrap_or(0);
-    if packed == 0 {
-        return MAP_UNKNOWN;
+    if colour == 0 || packed == 0 {
+        return MAP_UNKNOWN_FILL;
     }
     // A little shading by height, as vanilla's map item does.
     let shade = (0.85 + height as f32 / 512.0).clamp(0.65, 1.15);
-    let channel = |shift: u32| (((packed >> shift) & 0xFF) as f32 * shade).min(255.0) as u8;
-    [channel(16), channel(8), channel(0), 255]
+    let channel = |shift: u32| (((packed >> shift) & 0xFF) as f32 * shade).min(255.0) as u32;
+    0xFF00_0000 | (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
 /// Whether the built map no longer matches where the player is and how far out
@@ -974,7 +970,7 @@ pub(super) fn refresh_map(game: &mut crate::game::Game<'_>) {
     let texels = logic::TEXELS;
     let half = (texels / 2) as i32;
     let step = zoom as i32;
-    let mut rgba = vec![0u8; (texels * texels * 4) as usize];
+    let mut grid = vec![MAP_UNKNOWN_FILL; (texels * texels) as usize];
     let mut loaded = 0usize;
     let mut debug = String::from("centre: not loaded");
     {
@@ -985,80 +981,90 @@ pub(super) fn refresh_map(game: &mut crate::game::Game<'_>) {
             for column in 0..texels {
                 let x = center.0 + (column as i32 - half) * step;
                 let z = center.1 + (row as i32 - half) * step;
-                let centre = column == half as u32 && row == half as u32;
-                let pixel = if world.loaded(x, z) {
-                    loaded += 1;
-                    let surface = world.world_surface(x, z, is_air);
-                    let block = world.block(x, surface - 1, z);
-                    let entry = facts.states.get(block.0 as usize);
-                    let colour = entry.map_or(255, |state| state.map_color);
-                    if centre {
-                        debug = format!(
-                            "centre {x},{z} y{}: {} colour {colour} surface {surface}",
-                            surface - 1,
-                            entry.map_or("?", |state| &state.name)
-                        );
-                    }
-                    map_pixel(colour, surface)
-                } else {
-                    MAP_UNKNOWN
-                };
-                let at = ((row * texels + column) * 4) as usize;
-                rgba[at..at + 4].copy_from_slice(&pixel);
+                let at = (row * texels + column) as usize;
+                if !world.loaded(x, z) {
+                    continue;
+                }
+                loaded += 1;
+                let surface = world.world_surface(x, z, is_air);
+                let block = world.block(x, surface - 1, z);
+                let entry = facts.states.get(block.0 as usize);
+                let colour = entry.map_or(255, |state| state.map_color);
+                if column == half as u32 && row == half as u32 {
+                    debug = format!(
+                        "centre {x},{z} y{}: {} colour {colour} surface {surface}",
+                        surface - 1,
+                        entry.map_or("?", |state| &state.name)
+                    );
+                }
+                grid[at] = map_pixel(colour, surface);
             }
         }
     }
-    // The patch goes into the minimap slot's own pixels, as the engine's
-    // minimap would write it.
-    let uploaded = match game.gui.atlas.sprites.get(MAP_SPRITE).copied() {
-        Some(rect) => {
-            let (width, height) = (
-                game.gui.atlas.width as f32,
-                game.gui.atlas.height as f32,
-            );
-            game.map_patches.push(horizon_client::font::Patch {
-                x: (rect.u0 * width).round() as u32,
-                y: (rect.v0 * height).round() as u32,
-                width: texels,
-                height: texels,
-                rgba,
-            });
-            true
-        }
-        None => false,
-    };
-    let said = {
-        let mut state = state();
-        state.map_ready = uploaded;
-        state.map_built = Some((center, zoom));
-        state.map_at = Some(std::time::Instant::now());
-        state.map_debug = format!(
-            "{loaded}/{} loaded · chunks {} · slot {} · image {} · {debug}",
-            texels as usize * texels as usize,
-            game.world.chunks.len(),
-            if game.gui.atlas.sprites.contains_key(MAP_SPRITE) {
-                "ok"
-            } else {
-                "missing"
-            },
-            if uploaded { "written" } else { "missing" }
-        );
-        let first = !state.map_said;
-        state.map_said = true;
-        first
-    };
-    if said {
+    let mut state = state();
+    state.map_grid = grid;
+    state.map_ready = true;
+    state.map_built = Some((center, zoom));
+    state.map_at = Some(std::time::Instant::now());
+    state.map_debug = format!(
+        "{loaded}/{} loaded · chunks {} · {debug}",
+        texels as usize * texels as usize,
+        game.world.chunks.len()
+    );
+    let first = !state.map_said;
+    state.map_said = true;
+    drop(state);
+    if first {
         // Once, so a map that stays dark says why.
         tell(format!(
-            "Account Switch map: {loaded} of {} columns loaded, image {}",
-            texels as usize * texels as usize,
-            if uploaded { "written" } else { "missing" }
+            "Account Switch map: {loaded} of {} columns loaded",
+            texels as usize * texels as usize
         ));
     }
 }
 
+/// One filled cell per texel of `grid` (`texels` squared), inside `area`: the
+/// bundle draws the map itself, because a mixin bundle never gets the mod
+/// image slot `native_mod_image` writes.
+fn draw_grid(
+    host: &dyn crate::mod_api::Host,
+    batch: &mut crate::hud::HudBatch,
+    area: [f32; 4],
+    grid: &[u32],
+    texels: u32,
+    first_row: u32,
+    last_row: u32,
+    first_column: u32,
+    last_column: u32,
+) {
+    let [x, y, width, height] = area;
+    let span = (last_column - first_column).max(1) as f32;
+    let rows = (last_row - first_row).max(1) as f32;
+    for row in first_row..last_row {
+        let top = y + ((row - first_row) as f32 * height / rows).round();
+        let bottom = y + ((row - first_row + 1) as f32 * height / rows).round();
+        if bottom <= top {
+            continue;
+        }
+        for column in first_column..last_column {
+            let left = x + ((column - first_column) as f32 * width / span).round();
+            let right = x + ((column - first_column + 1) as f32 * width / span).round();
+            if right <= left {
+                continue;
+            }
+            let at = (row * texels + column) as usize;
+            host.fill(
+                batch,
+                [left, top, right - left, bottom - top],
+                grid.get(at).copied().unwrap_or(MAP_UNKNOWN_FILL),
+            );
+        }
+    }
+}
+
 /// The minimap in its corner, over the hotbar's HUD layer
-/// (`native_gui_layer_post`, API 139): the map's middle, with a frame.
+/// (`native_gui_layer_post`, API 139): the map's middle, one cell per second
+/// texel, with a frame.
 pub(super) fn hud_post(
     game: &crate::game::Game<'_>,
     layer: &str,
@@ -1068,23 +1074,29 @@ pub(super) fn hud_post(
     if !(layer == "minecraft:hotbar" || layer == "hotbar") || !game.native_playing() {
         return;
     }
-    let (ready, corner) = {
-        let state = state();
-        (state.map_ready, state.corner)
-    };
-    if !ready {
+    let state = state();
+    if !state.map_ready || state.map_grid.is_empty() {
         return;
     }
+    let corner = state.corner;
     let host: &dyn crate::mod_api::Host = game;
     let side = logic::MINIMAP;
     let at = logic::minimap_at([batch.width, batch.height], corner, side);
-    host.sprite(
+    let texels = logic::TEXELS;
+    let half = (texels / 2) as i32;
+    let reach = (logic::MINIMAP_TEXELS as u32 / 2) as i32;
+    let (first_column, last_column) = ((half - reach) as u32, (half + reach) as u32);
+    draw_grid(
+        host,
         batch,
-        MAP_SPRITE,
-        logic::minimap_crop(),
         [at[0], at[1], side, side],
+        &state.map_grid,
+        texels,
+        (half - reach) as u32,
+        (half + reach) as u32,
+        first_column,
+        last_column,
     );
-    // The frame: two pixels, dark outside and light inside, and the player.
     draw_outline(host, batch, [at[0] - 2.0, at[1] - 2.0, side + 4.0, side + 4.0], 1.0, 0xFF10_10_14);
     draw_outline(host, batch, [at[0] - 1.0, at[1] - 1.0, side + 2.0, side + 2.0], 1.0, 0xFF5A_5A_6A);
     host.fill(
@@ -1121,19 +1133,14 @@ fn draw_map(
     host.fill(batch, [0.0, 0.0, window[0], window[1]], VEIL);
     let side = (window[0].min(window[1]) - 28.0).max(120.0);
     let map = [(window[0] - side) / 2.0, (window[1] - side) / 2.0, side, side];
-    let (ready, zoom) = {
+    {
         let state = state();
-        (state.map_ready, state.map_zoom)
-    };
-    if ready {
-        host.sprite(
-            batch,
-            MAP_SPRITE,
-            [0.0, 0.0, logic::TEXELS as f32, logic::TEXELS as f32],
-            map,
-        );
-    } else {
-        host.fill(batch, map, MAP_UNKNOWN_FILL);
+        if state.map_ready && !state.map_grid.is_empty() {
+            let texels = logic::TEXELS;
+            draw_grid(host, batch, map, &state.map_grid, texels, 0, texels, 0, texels);
+        } else {
+            host.fill(batch, map, MAP_UNKNOWN_FILL);
+        }
     }
     draw_outline(host, batch, [map[0] - 2.0, map[1] - 2.0, map[2] + 4.0, map[3] + 4.0], 1.0, 0xFF10_10_14);
     draw_outline(host, batch, [map[0] - 1.0, map[1] - 1.0, map[2] + 2.0, map[3] + 2.0], 1.0, 0xFF5A_5A_6A);
@@ -1148,6 +1155,7 @@ fn draw_map(
         ],
         0xFF_FF_40_40,
     );
+    let zoom = state().map_zoom;
     let title = format!(
         "Map · {} blocks across · {} per pixel",
         logic::map_blocks(zoom),
