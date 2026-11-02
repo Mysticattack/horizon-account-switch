@@ -28,7 +28,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.7.0";
+pub const VERSION: &str = "0.8.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -43,7 +43,6 @@ const RECONNECT_FRAMES: u32 = 2;
 
 // The screen's colours, ARGB as the game's `fill` and `text` take them:
 // vanilla's tooltip background, and the text colours of its buttons.
-const SHADE: u32 = 0x80_10_10_10;
 const TITLE_TEXT: u32 = 0xFF_FF_FF_FF;
 const MUTED: u32 = 0xFF_A0_A0_A0;
 const HERE: u32 = 0xFF_6E_D8_6E;
@@ -92,6 +91,9 @@ struct State {
     /// A switch in flight: the account, and when it started. The screen shows
     /// it and takes no second request meanwhile.
     busy: Option<(String, std::time::Instant)>,
+    /// The first row the screen shows: the list scrolls when the accounts
+    /// don't fit.
+    scroll: usize,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
@@ -109,6 +111,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     status: None,
     copy: None,
     busy: None,
+    scroll: 0,
 });
 
 /// Messages for the next frame: the launcher threads can't reach the game.
@@ -484,6 +487,8 @@ pub(crate) struct View {
     status: Option<String>,
     /// A switch in flight: the account, and how long it has been running.
     pub(crate) busy: Option<(String, f32)>,
+    /// The first row the screen shows.
+    pub(crate) scroll: usize,
 }
 
 impl View {
@@ -537,6 +542,7 @@ fn view() -> View {
         .busy
         .as_ref()
         .map(|(who, since)| (who.clone(), since.elapsed().as_secs_f32()));
+    let scroll = state().scroll;
     View {
         accounts,
         playing: playing_name(),
@@ -544,6 +550,7 @@ fn view() -> View {
         sign_in,
         status,
         busy,
+        scroll,
     }
 }
 
@@ -555,92 +562,40 @@ pub(super) fn open(game: &mut crate::game::Game<'_>) {
     }
 }
 
-// Vanilla's own menu art: the dark dirt every menu shows over a world, its
-// separators, and the buttons.
-const BACKGROUND: &str = "gui/inworld_menu_background";
-const HEADER_SEPARATOR: &str = "gui/inworld_header_separator";
-const FOOTER_SEPARATOR: &str = "gui/inworld_footer_separator";
-const BUTTON: &str = "gui/sprites/widget/button";
-const BUTTON_HOVER: &str = "gui/sprites/widget/button_highlighted";
-const BUTTON_OFF: &str = "gui/sprites/widget/button_disabled";
-/// The tiles' size: the game draws the menu background at 32 GUI pixels.
-const TILE: f32 = 32.0;
-/// A vanilla button's texture is 200x20 (`gui/sprites/widget/button`).
-const BUTTON_WIDTH: f32 = 200.0;
-const BUTTON_HEIGHT: f32 = 20.0;
+// The screen's own look: a dark slate panel, rows that match it, and a scroll
+// lane — plain fills, so nothing depends on a resource pack's sprites.
+const VEIL: u32 = 0xB4_00_00_00;
+const PANEL: u32 = 0xF2_16_16_1E;
+const HEADER_FILL: u32 = 0xFF_1E_1E_28;
+const BORDER: u32 = 0xFF_3E_3E_52;
+const ROW_FILL: u32 = 0xF2_26_26_32;
+const ROW_FILL_HOVER: u32 = 0xF2_34_34_46;
+const ROW_FILL_ACTIVE: u32 = 0xF2_1C_33_24;
+const ROW_FILL_BUSY: u32 = 0xF2_22_22_2A;
+const ROW_BORDER: u32 = 0xFF_3E_3E_52;
+const ROW_BORDER_HOVER: u32 = 0xFF_8A_8A_A8;
+const ROW_BORDER_ACTIVE: u32 = 0xFF_46_8A_58;
+const ROW_BORDER_BUSY: u32 = 0xFF_45_45_50;
+const SCROLL_TRACK: u32 = 0x30_FF_FF_FF;
+const SCROLL_THUMB: u32 = 0xFF_7A_7A_98;
 
-/// Draws `sprite` as the game draws a button: the texture's two halves, each
-/// stretched to half the width, so the rounded ends keep their shape.
-fn draw_button(
+/// A filled rectangle with a one-pixel border, the shape of everything here.
+fn draw_box(
     host: &dyn crate::mod_api::Host,
     batch: &mut crate::hud::HudBatch,
     rect: [f32; 4],
-    sprite: &str,
+    fill: u32,
+    border: u32,
 ) {
     let [x, y, width, height] = rect;
-    let half = (width / 2.0).floor();
-    let middle = BUTTON_WIDTH / 2.0;
-    host.sprite(batch, sprite, [0.0, 0.0, middle, BUTTON_HEIGHT], [x, y, half, height]);
-    host.sprite(
-        batch,
-        sprite,
-        [middle, 0.0, middle, BUTTON_HEIGHT],
-        [x + half, y, width - half, height],
-    );
+    host.fill(batch, rect, fill);
+    host.fill(batch, [x, y, width, 1.0], border);
+    host.fill(batch, [x, y + height - 1.0, width, 1.0], border);
+    host.fill(batch, [x, y, 1.0, height], border);
+    host.fill(batch, [x + width - 1.0, y, 1.0, height], border);
 }
 
-/// Repeats `sprite` over `rect` in `cell`-sized tiles, the last row and column
-/// cut to fit, as vanilla tiles its menu background and separators. False when
-/// the atlas has no such sprite.
-fn draw_tiled(
-    host: &dyn crate::mod_api::Host,
-    batch: &mut crate::hud::HudBatch,
-    game: &crate::game::Game<'_>,
-    sprite: &str,
-    rect: [f32; 4],
-    cell: [f32; 2],
-) -> bool {
-    let Some(size) = game.native_sprite_size(sprite) else {
-        return false;
-    };
-    let [x, y, width, height] = rect;
-    if width <= 0.0 || height <= 0.0 || size[0] <= 0.0 || size[1] <= 0.0 {
-        return false;
-    }
-    let columns = (width / cell[0]).ceil() as i32;
-    let rows = (height / cell[1]).ceil() as i32;
-    for row in 0..rows {
-        for column in 0..columns {
-            let left = column as f32 * cell[0];
-            let top = row as f32 * cell[1];
-            let used_x = (width - left).min(cell[0]);
-            let used_y = (height - top).min(cell[1]);
-            if used_x <= 0.0 || used_y <= 0.0 {
-                continue;
-            }
-            host.sprite(
-                batch,
-                sprite,
-                [0.0, 0.0, size[0] * used_x / cell[0], size[1] * used_y / cell[1]],
-                [x + left, y + top, used_x, used_y],
-            );
-        }
-    }
-    true
-}
-
-/// The button column in GUI pixels: the same rectangle for drawing and clicks.
-fn panel_of(screen: &crate::mod_api::NativeScreenView<'_>, rows: usize) -> [f32; 4] {
-    logic::panel(
-        [screen.rect[0] + screen.rect[2], screen.rect[1] + screen.rect[3]],
-        rows,
-    )
-}
-
-/// Draws the screen over the world (`native_screen_render_post`, API 78) the
-/// way vanilla draws a menu: the tiled dark dirt, the title over a header
-/// separator, one button per row, a footer separator, and the hint in the
-/// screen's bottom corner.
+/// Draws the screen over the world (`native_screen_render_post`, API 78).
 pub(super) fn draw(
     game: &crate::game::Game<'_>,
     batch: &mut crate::hud::HudBatch,
@@ -653,47 +608,52 @@ pub(super) fn draw(
     let rows = view.rows();
     let host: &dyn crate::mod_api::Host = game;
     let window = [screen.rect[0] + screen.rect[2], screen.rect[1] + screen.rect[3]];
-    let whole = [0.0, 0.0, window[0], window[1]];
-    if !draw_tiled(host, batch, game, BACKGROUND, whole, [TILE, TILE]) {
-        host.fill(batch, whole, SHADE);
-    }
-    let panel = panel_of(screen, rows.len());
+    host.fill(batch, [0.0, 0.0, window[0], window[1]], VEIL);
+    let visible = logic::visible_rows(window).min(rows.len().max(1));
+    let (first, count) = logic::window_of(view.scroll, rows.len(), visible);
+    let panel = logic::panel(window, visible.max(1));
     let [x, y, width, height] = panel;
-    // The title, and the header separator under it, as on every vanilla menu.
+    draw_box(host, batch, panel, PANEL, BORDER);
+    // The title bar, a shade lighter, with a line under it.
+    host.fill(
+        batch,
+        [x + 1.0, y + 1.0, width - 2.0, logic::HEADER - 1.0],
+        HEADER_FILL,
+    );
+    host.fill(
+        batch,
+        [x + 1.0, y + logic::HEADER, width - 2.0, 1.0],
+        BORDER,
+    );
     let title = game.native_text_width(TITLE);
     host.text(
         batch,
         TITLE,
-        [x + (width - title) / 2.0, y - 26.0],
+        [x + (width - title) / 2.0, y + 8.0],
         TITLE_TEXT,
         true,
     );
-    draw_tiled(
-        host,
-        batch,
-        game,
-        HEADER_SEPARATOR,
-        [0.0, y - 8.0, window[0], 2.0],
-        [TILE, 2.0],
-    );
-    let hovered = logic::hit(panel, rows.len(), screen.mouse);
-    for (index, (action, label)) in rows.iter().enumerate() {
+    let hovered = logic::hit(panel, visible, screen.mouse);
+    for (index, (action, label)) in rows[first..first + count].iter().enumerate() {
         let rect = logic::row(panel, index);
         let here = matches!(action, Action::Switch(at)
             if view.accounts.get(*at).is_some_and(|account| view
                 .playing
                 .as_deref()
                 .is_some_and(|name| name.eq_ignore_ascii_case(&account.name))));
-        let sprite = if matches!(action, Action::Busy) {
-            BUTTON_OFF
+        let busy = matches!(action, Action::Busy);
+        let (fill, border) = if busy {
+            (ROW_FILL_BUSY, ROW_BORDER_BUSY)
+        } else if here {
+            (ROW_FILL_ACTIVE, ROW_BORDER_ACTIVE)
         } else if hovered == Some(index) {
-            BUTTON_HOVER
+            (ROW_FILL_HOVER, ROW_BORDER_HOVER)
         } else {
-            BUTTON
+            (ROW_FILL, ROW_BORDER)
         };
-        draw_button(host, batch, rect, sprite);
-        // Vanilla turns a button's label yellow under the pointer.
-        let text = if matches!(action, Action::Busy) {
+        draw_box(host, batch, rect, fill, border);
+        // Vanilla colours a button's label under the pointer yellow.
+        let text = if busy {
             MUTED
         } else if here {
             HERE
@@ -711,7 +671,7 @@ pub(super) fn draw(
             true,
         );
     }
-    // A switch in flight: a bar inside its button.
+    // A switch in flight: a bar inside its row.
     if let Some((_, elapsed)) = &view.busy {
         let rect = logic::row(panel, 0);
         let fraction = 0.15 + 0.85 * (0.5 - 0.5 * (elapsed * 3.0).cos());
@@ -726,17 +686,41 @@ pub(super) fn draw(
             HERE,
         );
     }
-    // The footer separator, then what happened last or a sign-in's code.
-    let footer = y + height + 12.0;
-    draw_tiled(
-        host,
+    // The scroll lane, and its thumb when there is more than one page.
+    if rows.len() > visible {
+        let lane = [
+            x + width - logic::BAR - 1.0,
+            y + logic::HEADER + logic::PAD,
+            logic::BAR - 4.0,
+            visible as f32 * logic::ROW - (logic::ROW - logic::BUTTON),
+        ];
+        host.fill(batch, lane, SCROLL_TRACK);
+        let share = visible as f32 / rows.len() as f32;
+        let thumb = (lane[3] * share).max(10.0);
+        let pages = (rows.len() - visible) as f32;
+        let at = if pages > 0.0 { first as f32 / pages } else { 0.0 };
+        host.fill(
+            batch,
+            [lane[0], lane[1] + (lane[3] - thumb) * at, lane[2], thumb],
+            SCROLL_THUMB,
+        );
+    }
+    // The hint line inside the panel's foot.
+    let hint = if rows.len() > visible {
+        "wheel scrolls · click to switch · Esc closes"
+    } else {
+        "click to switch · Esc closes"
+    };
+    let hint_width = game.native_text_width(hint);
+    host.text(
         batch,
-        game,
-        FOOTER_SEPARATOR,
-        [0.0, footer, window[0], 2.0],
-        [TILE, 2.0],
+        hint,
+        [x + (width - hint_width) / 2.0, y + height - logic::FOOTER + 7.0],
+        MUTED,
+        true,
     );
-    let mut line = footer + 8.0;
+    // Below the panel: what happened last, or a sign-in's code.
+    let mut line = y + height + 6.0;
     if let Some(sign_in) = &view.sign_in {
         draw_line(host, batch, game, panel, &format!("Code: {}", sign_in.code), line, CODE);
         line += 12.0;
@@ -758,18 +742,9 @@ pub(super) fn draw(
     } else if let Some(status) = &view.status {
         draw_line(host, batch, game, panel, status, line, MUTED);
     }
-    let hint = "Esc closes · click a row to switch";
-    let hint_width = game.native_text_width(hint);
-    host.text(
-        batch,
-        hint,
-        [x + (width - hint_width) / 2.0, window[1] - 18.0],
-        MUTED,
-        true,
-    );
 }
 
-/// A line of text under the column, centred with it.
+/// A line of text under the panel, centred with it.
 fn draw_line(
     host: &dyn crate::mod_api::Host,
     batch: &mut crate::hud::HudBatch,
@@ -797,11 +772,14 @@ pub(super) fn clicked(
     }
     let view = view();
     let rows = view.rows();
-    let panel = panel_of(screen, rows.len());
-    let Some(index) = logic::hit(panel, rows.len(), screen.mouse) else {
+    let window = [screen.rect[0] + screen.rect[2], screen.rect[1] + screen.rect[3]];
+    let visible = logic::visible_rows(window).min(rows.len().max(1));
+    let (first, count) = logic::window_of(view.scroll, rows.len(), visible);
+    let panel = logic::panel(window, visible.max(1));
+    let Some(index) = logic::hit(panel, count, screen.mouse) else {
         return;
     };
-    let Some((action, label)) = rows.get(index).cloned() else {
+    let Some((action, label)) = rows.get(first + index).cloned() else {
         return;
     };
     *canceled = true;
@@ -845,6 +823,34 @@ pub(super) fn clicked(
         }
     }
     let _ = label;
+}
+
+/// The wheel over the screen (`native_screen_mouse_scrolled_pre`, API 93):
+/// the list scrolls when the accounts don't all fit.
+pub(super) fn wheel(
+    game: &crate::game::Game<'_>,
+    screen: &crate::mod_api::NativeScreenView<'_>,
+    scroll: [f64; 2],
+    canceled: &mut bool,
+) {
+    if game.native_mod_screen() != Some(ID) {
+        return;
+    }
+    let steps = scroll[1].round() as i32;
+    if steps == 0 {
+        return;
+    }
+    let rows = view().rows().len();
+    let window = [screen.rect[0] + screen.rect[2], screen.rect[1] + screen.rect[3]];
+    let visible = logic::visible_rows(window);
+    if rows <= visible {
+        return;
+    }
+    {
+        let mut state = state();
+        state.scroll = logic::scrolled(state.scroll, rows, visible, steps);
+    }
+    *canceled = true;
 }
 
 /// The key: open (or close) the switch screen (`native_key`'s hook).

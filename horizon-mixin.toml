@@ -1,6 +1,6 @@
 [mod]
 id = "account_switch"
-version = "0.7.0"
+version = "0.8.0"
 priority = 100
 
 # The commit this bundle was written and built against. `horizon-launcher
@@ -99,7 +99,8 @@ bindings = [
   { name = "button", ty = "usize", value = "button" },
 ]
 
-# The mod's own screen (API 111): drawn over the world, and its clicks.
+# The mod's own screen (API 111): drawn over the world, its clicks and the
+# wheel that scrolls a long account list.
 [[injection]]
 id = "screen_draw"
 kind = "HEAD"
@@ -120,6 +121,18 @@ bindings = [
   { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
   { name = "screen", ty = "&crate::mod_api::NativeScreenView<'_>", value = "&*screen" },
   { name = "button", ty = "i32", value = "button" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+[[injection]]
+id = "screen_wheel"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_mouse_scrolled_pre"
+helper = "wheel.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "screen", ty = "&crate::mod_api::NativeScreenView<'_>", value = "&*screen" },
+  { name = "scroll", ty = "[f64; 2]", value = "scroll" },
   { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
 ]
 

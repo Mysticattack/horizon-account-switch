@@ -176,42 +176,72 @@ pub fn signed_in_name(text: &str) -> Option<String> {
     })
 }
 
-/// The distance from one row's top to the next: a vanilla button's 20 pixels
-/// and 4 between them.
+/// The distance from one row's top to the next.
 pub const ROW: f32 = 24.0;
-/// A row's drawn height: vanilla's button texture is 20 pixels tall.
+/// A row's drawn height.
 pub const BUTTON: f32 = 20.0;
-/// The button column's width: vanilla's buttons are 200 pixels wide.
-pub const WIDTH: f32 = 200.0;
-const MARGIN: f32 = 20.0;
-/// The smallest room above the column: the title and the separator.
-pub const TITLE_SPACE: f32 = 46.0;
+/// The panel's width; names of six or sixteen letters fit either side.
+pub const WIDTH: f32 = 260.0;
+/// The title bar above the rows.
+pub const HEADER: f32 = 28.0;
+/// The hint line below the rows, inside the panel.
+pub const FOOTER: f32 = 22.0;
+/// Room between the panel's edge and its rows.
+pub const PAD: f32 = 8.0;
+/// The lane on the right the scrollbar uses.
+pub const BAR: f32 = 8.0;
+/// The margin the panel keeps from the window's edge.
+pub const MARGIN: f32 = 12.0;
 
-/// The button column in GUI pixels (`[x, y, width, height]`), centred in the
-/// window, `rows` buttons tall.
-pub fn panel(window: [f32; 2], rows: usize) -> [f32; 4] {
-    let width = WIDTH.min((window[0] - MARGIN).max(120.0));
-    let height = (rows.max(1) as f32 * ROW - (ROW - BUTTON)).max(BUTTON);
+/// How many rows the window can show at once: as many as fit between the
+/// margins, with the title bar and the hint line.
+pub fn visible_rows(window: [f32; 2]) -> usize {
+    let room = window[1] - MARGIN * 2.0 - HEADER - PAD * 2.0 - FOOTER;
+    let fit = ((room + (ROW - BUTTON)) / ROW).floor();
+    (fit as i32).max(1) as usize
+}
+
+/// The panel in GUI pixels (`[x, y, width, height]`), centred in the window,
+/// holding `visible` rows.
+pub fn panel(window: [f32; 2], visible: usize) -> [f32; 4] {
+    let width = WIDTH.min(window[0] - MARGIN * 2.0).max(180.0);
+    let rows = visible as f32 * ROW - (ROW - BUTTON);
+    let height = HEADER + PAD + rows + PAD + FOOTER;
     let x = ((window[0] - width) / 2.0).floor().max(0.0);
-    let y = ((window[1] - height) / 2.0)
-        .floor()
-        .max(TITLE_SPACE)
-        .min((window[1] - height).max(TITLE_SPACE));
+    let y = ((window[1] - height) / 2.0).floor().max(MARGIN);
     [x, y, width, height]
 }
 
-/// The rectangle of row `index` (`0` is the first button).
+/// The rectangle of visible row `index` (the first one shown, not the first
+/// of the list).
 pub fn row(panel: [f32; 4], index: usize) -> [f32; 4] {
-    [panel[0], panel[1] + index as f32 * ROW, panel[2], BUTTON]
+    [
+        panel[0] + PAD,
+        panel[1] + HEADER + PAD + index as f32 * ROW,
+        panel[2] - PAD * 2.0 - BAR,
+        BUTTON,
+    ]
 }
 
-/// The row under `mouse`, when `mouse` is inside the panel: `None` on the
-/// title, the hint, the gaps or outside it.
-pub fn hit(panel: [f32; 4], rows: usize, mouse: [f32; 2]) -> Option<usize> {
-    (0..rows).find(|index| {
+/// The visible row under `mouse`, if any.
+pub fn hit(panel: [f32; 4], visible: usize, mouse: [f32; 2]) -> Option<usize> {
+    (0..visible).find(|index| {
         let [x, y, width, height] = row(panel, *index);
         mouse[0] >= x && mouse[0] < x + width && mouse[1] >= y && mouse[1] < y + height
     })
+}
+
+/// Where the list starts after `steps` wheel steps (down the list is
+/// positive, as the game reports the wheel), kept so the last page stays full.
+pub fn scrolled(offset: usize, total: usize, visible: usize, steps: i32) -> usize {
+    let last = total.saturating_sub(visible);
+    (offset as i32 + steps).clamp(0, last as i32) as usize
+}
+
+/// The visible window of a list: `(first shown, how many)`.
+pub fn window_of(offset: usize, total: usize, visible: usize) -> (usize, usize) {
+    let first = offset.min(total.saturating_sub(visible));
+    (first, total.saturating_sub(first).min(visible))
 }
 
 #[cfg(test)]
@@ -373,36 +403,53 @@ mod tests {
     }
 
     #[test]
-    fn the_panel_is_centred_and_holds_its_rows() {
-        let p = panel([320.0, 240.0], 3);
+    fn the_panel_holds_the_rows_it_shows_and_stays_in_the_window() {
+        let window = [352.0, 203.0];
+        let visible = visible_rows(window);
+        assert!(visible >= 3);
+        let p = panel(window, visible);
         assert_eq!(p[2], WIDTH);
-        assert_eq!(p[0], (320.0 - WIDTH) / 2.0);
-        // Three buttons: 20 + 4 + 20 + 4 + 20 = 68 tall, centred.
-        assert_eq!(p[3], 3.0 * ROW - (ROW - BUTTON));
-        assert_eq!(p[1], ((240.0 - p[3]) / 2.0).floor());
-        let last = row(p, 2);
-        assert_eq!(last[1] + last[3], p[1] + p[3]);
-        // A small window keeps its margin rather than overflowing, and the
-        // column never starts above the title's room.
-        let small = panel([100.0, 80.0], 4);
-        assert_eq!(small[2], 120.0);
-        assert_eq!(small[0], 0.0);
-        assert_eq!(small[1], TITLE_SPACE);
+        assert_eq!(p[0], ((352.0 - WIDTH) / 2.0).floor());
+        // The last of the rows ends above the hint line.
+        let last = row(p, visible - 1);
+        assert!(last[1] + last[3] <= p[1] + p[3] - FOOTER);
+        // Everything stays inside the window.
+        assert!(p[1] >= MARGIN);
+        assert!(p[1] + p[3] <= window[1] - MARGIN + 0.5);
+        // A narrow window still gets a usable panel.
+        assert!(panel([200.0, 203.0], 3)[2] >= 180.0);
+    }
+
+    #[test]
+    fn many_accounts_scroll_and_keep_the_last_page_full() {
+        // A tall window shows a dozen rows; twelve accounts still need
+        // two pages of six.
+        assert!(visible_rows([352.0, 400.0]) >= 12);
+        let visible = 6;
+        assert_eq!(scrolled(0, 12, visible, 1), 1);
+        assert_eq!(scrolled(0, 12, visible, -1), 0);
+        assert_eq!(scrolled(6, 12, visible, -5), 1);
+        assert_eq!(scrolled(3, 12, visible, 5), 6);
+        assert_eq!(scrolled(5, 4, visible, 1), 0);
+        assert_eq!(window_of(6, 12, 6), (6, 6));
+        assert_eq!(window_of(11, 12, 6), (6, 6));
+        assert_eq!(window_of(0, 3, 6), (0, 3));
     }
 
     #[test]
     fn a_row_is_hit_only_where_it_is() {
-        let p = panel([320.0, 240.0], 3);
+        let window = [352.0, 400.0];
+        let p = panel(window, 4);
         let [x, y, width, height] = row(p, 1);
-        assert_eq!(hit(p, 3, [x + 1.0, y + 1.0]), Some(1));
-        assert_eq!(hit(p, 3, [x + width - 1.0, y + height - 1.0]), Some(1));
-        assert_eq!(hit(p, 3, [x + width, y + 1.0]), None);
-        assert_eq!(hit(p, 3, [x + 1.0, y + height]), None);
-        // Above the column (the title) and the gap between two rows.
-        assert_eq!(hit(p, 3, [x + 1.0, p[1] - 4.0]), None);
-        assert_eq!(hit(p, 3, [x + 1.0, y + height + 0.5]), None);
-        // A row past the ones there are.
-        let [_, below, _, _] = row(p, 3);
-        assert_eq!(hit(p, 3, [x + 1.0, below + 1.0]), None);
+        assert_eq!(hit(p, 4, [x + 1.0, y + 1.0]), Some(1));
+        assert_eq!(hit(p, 4, [x + width - 1.0, y + height - 1.0]), Some(1));
+        assert_eq!(hit(p, 4, [x + width + 1.0, y + 1.0]), None);
+        assert_eq!(hit(p, 4, [x + 1.0, y + height + 1.0]), None);
+        // The title bar above and the hint line below.
+        assert_eq!(hit(p, 4, [x + 1.0, p[1] + 2.0]), None);
+        assert_eq!(hit(p, 4, [x + 1.0, p[1] + p[3] - 4.0]), None);
+        // Only the rows it was told about.
+        let [_, below, _, _] = row(p, 4);
+        assert_eq!(hit(p, 4, [x + 1.0, below + 1.0]), None);
     }
 }
