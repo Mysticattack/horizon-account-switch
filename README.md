@@ -18,6 +18,11 @@ Account — anklicken, fertig. Die Zeile **+ Add account** startet eine Microsof
 die Anmeldeseite im Browser und legt den Code in die Zwischenablage** (Zeile `Copy code …` kopiert
 ihn noch einmal), danach steht der neue Account in der Liste. **Esc** schließt.
 
+Während ein Wechsel läuft, zeigt das Fenster nur noch `Switching to <Name>…` mit einem laufenden Balken und
+nimmt keine weiteren Klicks an — so meldet man sich nicht versehentlich zweimal an. Klick auf den Account,
+der schon spielt, oder ein Sign-in mit einem bereits angemeldeten Account sagt das ausdrücklich
+(`<Name> is already signed in`).
+
 Voraussetzung: im Launcher sind mindestens zwei Microsoft-Accounts eingeloggt (einer davon mit
 Java Edition). Native Mods laufen mit deinen Rechten und sind nicht sandboxed — genau dafür ist
 `--trust-native-code` da.

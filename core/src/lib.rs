@@ -165,6 +165,17 @@ pub fn parse_sign_in(line: &str) -> Option<(String, String)> {
     (!link.is_empty() && !code.is_empty()).then(|| (link.to_owned(), code.to_owned()))
 }
 
+/// The account the launcher says it signed in: `Signed in as Alex.` (or
+/// `Signed in as Alex again.`). None for every other line.
+pub fn signed_in_name(text: &str) -> Option<String> {
+    text.lines().rev().find_map(|line| {
+        let rest = line.trim().strip_prefix("Signed in as ")?;
+        let rest = rest.strip_suffix(" again.").unwrap_or(rest);
+        let name = rest.strip_suffix('.').unwrap_or(rest).trim();
+        (!name.is_empty()).then(|| name.to_owned())
+    })
+}
+
 /// The space above the first row of the screen: the title.
 pub const HEADER: f32 = 28.0;
 /// The space below the last row: the hint line.
@@ -324,6 +335,24 @@ mod tests {
         assert_eq!(click(3, 2, 3), Click::Nothing);
         assert_eq!(click(2, 0, 1), Click::Nothing);
         assert_eq!(click(2, 0, 7), Click::Nothing);
+    }
+
+    #[test]
+    fn the_launchers_signed_in_line_names_the_account() {
+        assert_eq!(
+            signed_in_name("Signed in as Alex."),
+            Some("Alex".to_owned())
+        );
+        assert_eq!(
+            signed_in_name("Signed in as Alex again."),
+            Some("Alex".to_owned())
+        );
+        assert_eq!(
+            signed_in_name("noise\nSigned in as Redstonerthebest.\n"),
+            Some("Redstonerthebest".to_owned())
+        );
+        assert_eq!(signed_in_name("To sign in, open x"), None);
+        assert_eq!(signed_in_name("Signed in as ."), None);
     }
 
     #[test]

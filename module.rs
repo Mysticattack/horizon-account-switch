@@ -28,7 +28,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.3.0";
+pub const VERSION: &str = "0.4.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -90,6 +90,9 @@ struct State {
     status: Option<String>,
     /// A code to put on the clipboard on the next frame (the screen can't).
     copy: Option<String>,
+    /// A switch in flight: the account, and when it started. The screen shows
+    /// it and takes no second request meanwhile.
+    busy: Option<(String, std::time::Instant)>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
@@ -106,6 +109,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     sign_in_running: false,
     status: None,
     copy: None,
+    busy: None,
 });
 
 /// Messages for the next frame: the launcher threads can't reach the game.
@@ -210,6 +214,17 @@ fn refresh_accounts() {
 /// Microsoft sign-in and the Minecraft token and writes the read-once session
 /// file the game takes over.
 fn start_switch(who: String) {
+    {
+        let mut state = state();
+        if let Some((other, since)) = &state.busy {
+            if since.elapsed().as_secs() < 60 {
+                state.status = Some(format!("still switching to {other}…"));
+                return;
+            }
+        }
+        state.busy = Some((who.clone(), std::time::Instant::now()));
+        state.status = Some(format!("switching to {who}…"));
+    }
     std::thread::spawn(move || {
         let answer = run_launcher(&["account", "session", &who])
             .and_then(|text| logic::parse_session_file(&text))
@@ -224,7 +239,9 @@ fn start_switch(who: String) {
             Err(error) => {
                 log::warn!("Account Switch: no session for {who}: {error}");
                 tell(format!("Account Switch: {who} can't play: {error}"));
-                set_status(format!("{who}: {error}"));
+                let mut state = state();
+                state.busy = None;
+                state.status = Some(format!("{who}: {error}"));
             }
         }
     });
@@ -232,15 +249,17 @@ fn start_switch(who: String) {
 
 /// Starts a Microsoft sign-in: a new account (`None`), or `who` again.
 fn add_account(target: Option<String>) {
-    {
+    let known: Vec<String> = {
         let mut state = state();
         if state.sign_in_running {
+            state.status = Some("a sign-in is already running".to_owned());
             return;
         }
         state.sign_in_running = true;
         state.sign_in = None;
         state.status = Some("asking Microsoft for a code…".to_owned());
-    }
+        state.accounts.iter().map(|account| account.name.clone()).collect()
+    };
     std::thread::spawn(move || {
         let mut command = Command::new(launcher());
         command.args(["account", "sign-in"]);
@@ -276,10 +295,30 @@ fn add_account(target: Option<String>) {
                 }
             }
         }
-        let signed_in = child.wait().map(|status| status.success()).unwrap_or(false);
+        let finished = child.wait();
+        let mut said = String::new();
+        if let Some(mut out) = child.stdout.take() {
+            use std::io::Read;
+            let _ = out.read_to_string(&mut said);
+        }
+        let signed_in = finished.map(|status| status.success()).unwrap_or(false);
         if signed_in {
             refresh_accounts();
-            finish_sign_in("signed in".to_owned());
+            let name = logic::signed_in_name(&said);
+            let already = name.as_ref().is_some_and(|name| {
+                known.iter().any(|known| known.eq_ignore_ascii_case(name))
+            });
+            finish_sign_in(match name {
+                Some(name) if already => {
+                    tell(format!("Account Switch: {name} is already signed in"));
+                    format!("{name} is already signed in")
+                }
+                Some(name) => {
+                    tell(format!("Account Switch: {name} signed in"));
+                    format!("{name} signed in")
+                }
+                None => "signed in".to_owned(),
+            });
         } else {
             finish_sign_in("the sign-in did not finish".to_owned());
         }
@@ -357,10 +396,15 @@ pub(super) fn pump(game: &mut crate::game::Game<'_>) {
         {
             let mut state = state();
             state.playing = Some(who.clone());
-            state.status = Some(format!("playing as {who}"));
             if in_server {
+                // The reconnect below ends the switch; until then the screen
+                // keeps saying what it is doing.
+                state.status = Some(format!("joining the server as {who}…"));
                 state.back = state.last.clone();
                 state.wait = RECONNECT_FRAMES;
+            } else {
+                state.busy = None;
+                state.status = Some(format!("playing as {who} from the next join on"));
             }
         }
         game.system_message(horizon_client::text::Text::literal(if in_server {
@@ -393,8 +437,26 @@ pub(super) fn pump(game: &mut crate::game::Game<'_>) {
         game.system_message(horizon_client::text::Text::literal(format!(
             "Account Switch: joining {address} again"
         )));
-        if let Err(error) = game.connect_server(&address, &name) {
-            log::warn!("Account Switch: joining {address} failed: {error}");
+        let failure = game.connect_server(&address, &name).err();
+        {
+            let mut state = state();
+            state.busy = None;
+            state.status = Some(match &failure {
+                Some(error) => format!("joining {address} failed: {error}"),
+                None => format!("joined {address} again"),
+            });
+        }
+    }
+    // A switch that never finished (a hung launcher) lets go of the screen.
+    {
+        let mut state = state();
+        let hung = state
+            .busy
+            .as_ref()
+            .is_some_and(|(_, since)| since.elapsed().as_secs() > 60);
+        if hung {
+            state.busy = None;
+            state.status = Some("the switch took too long".to_owned());
         }
     }
 }
@@ -410,6 +472,8 @@ pub(crate) enum Action {
     Add,
     /// Put the running sign-in's code on the clipboard again.
     Copy,
+    /// A switch is in flight: the row only says so.
+    Busy,
 }
 
 /// What the screen shows, read in one go.
@@ -419,11 +483,16 @@ pub(crate) struct View {
     listing: bool,
     pub(crate) sign_in: Option<SignIn>,
     status: Option<String>,
+    /// A switch in flight: the account, and how long it has been running.
+    pub(crate) busy: Option<(String, f32)>,
 }
 
 impl View {
     /// The screen's rows, top to bottom: the actions and their labels.
     pub(crate) fn rows(&self) -> Vec<(Action, String)> {
+        if let Some((who, _)) = &self.busy {
+            return vec![(Action::Busy, format!("Switching to {who}…"))];
+        }
         let mut rows = vec![(
             Action::Refresh,
             if self.listing {
@@ -465,12 +534,17 @@ fn view() -> View {
             state.status.clone(),
         )
     };
+    let busy = state()
+        .busy
+        .as_ref()
+        .map(|(who, since)| (who.clone(), since.elapsed().as_secs_f32()));
     View {
         accounts,
         playing: playing_name(),
         listing,
         sign_in,
         status,
+        busy,
     }
 }
 
@@ -518,6 +592,16 @@ pub(super) fn draw(
                 .is_some_and(|name| name.eq_ignore_ascii_case(&account.name))));
         let rgb = if here { HERE } else { TEXT };
         host.text(batch, label, [rect[0] + 4.0, rect[1] + 6.0], rgb, true);
+    }
+    // A switch in flight: a bar that fills and empties under its row.
+    if let Some((_, elapsed)) = &view.busy {
+        let rect = logic::row(panel, 0);
+        let fraction = 0.15 + 0.85 * (0.5 - 0.5 * (elapsed * 3.0).cos());
+        host.fill(
+            batch,
+            [rect[0] + 4.0, rect[1] + rect[3] - 4.0, (rect[2] - 8.0) * fraction, 2.0],
+            HERE,
+        );
     }
     host.text(
         batch,
@@ -571,7 +655,12 @@ pub(super) fn clicked(
         return;
     };
     *canceled = true;
+    if let Some((who, _)) = &view.busy {
+        set_status(format!("still switching to {who}…"));
+        return;
+    }
     match action {
+        Action::Busy => {}
         Action::Refresh => {
             refresh_accounts();
             set_status("reading the launcher's accounts…");
@@ -585,6 +674,9 @@ pub(super) fn clicked(
                 .as_deref()
                 .is_some_and(|name| name.eq_ignore_ascii_case(&account.name))
             {
+                let line = format!("{} is already signed in and playing", account.name);
+                set_status(line.clone());
+                tell(format!("Account Switch: {line}"));
                 return;
             }
             let ready = account.state.is_empty() || account.state == "ready";
@@ -658,7 +750,14 @@ pub(super) fn clicked_page(game: &mut crate::game::Game<'_>, mod_id: &str, butto
     let Some((action, _)) = rows.get(button).cloned() else {
         return;
     };
+    if let Some((who, _)) = &view.busy {
+        game.system_message(horizon_client::text::Text::literal(format!(
+            "Account Switch: still switching to {who}"
+        )));
+        return;
+    }
     match action {
+        Action::Busy => {}
         Action::Refresh => {
             refresh_accounts();
             game.system_message(horizon_client::text::Text::literal(
@@ -674,6 +773,10 @@ pub(super) fn clicked_page(game: &mut crate::game::Game<'_>, mod_id: &str, butto
                 .as_deref()
                 .is_some_and(|name| name.eq_ignore_ascii_case(&account.name))
             {
+                game.system_message(horizon_client::text::Text::literal(format!(
+                    "Account Switch: {} is already signed in and playing",
+                    account.name
+                )));
                 return;
             }
             let ready = account.state.is_empty() || account.state == "ready";
