@@ -1,6 +1,6 @@
 [mod]
 id = "account_switch"
-version = "0.9.0"
+version = "0.10.0"
 priority = 100
 
 # The commit this bundle was written and built against. `horizon-launcher
@@ -153,6 +153,16 @@ helper = "zoom_wheel.rs"
 bindings = [
   { name = "steps", ty = "f32", value = "steps" },
   { name = "claimed", ty = "&mut bool", value = "&mut *claimed" },
+]
+
+# The minimap in the corner, and the big map the map key opens.
+[[injection]]
+id = "minimap"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_minimap"
+helper = "minimap.rs"
+bindings = [
+  { name = "minimap", ty = "&mut Option<crate::game::native_hooks::NativeMinimap>", value = "&mut *minimap" },
 ]
 
 # Every server join keeps its address, for the switch to join it again.

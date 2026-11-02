@@ -28,17 +28,21 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.9.0";
+pub const VERSION: &str = "0.10.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
-     again as the other account. Hold the zoom key to zoom in; the wheel changes how far.";
+     again as the other account. Hold the zoom key to zoom in (the wheel changes how far), and press the map \
+     key for the minimap's big map.";
 /// The key's name and its default: nothing vanilla uses.
 pub const KEY: &str = "switch";
 pub const DEFAULT_KEY: &str = "key.keyboard.f9";
 /// The zoom key: held, it zooms in; the wheel changes how far.
 pub const ZOOM_KEY: &str = "zoom";
 pub const ZOOM_DEFAULT: &str = "key.keyboard.c";
+/// The map key: it opens the minimap into the big map and back.
+pub const MAP_KEY: &str = "map";
+pub const MAP_DEFAULT: &str = "key.keyboard.m";
 /// The screen's title.
 const TITLE: &str = "Account Switch";
 /// Frames to let the title come back before joining again.
@@ -99,6 +103,10 @@ struct State {
     scroll: usize,
     /// Held zoom factor while the zoom key is down.
     zoom: Option<f32>,
+    /// The map key was pressed: the minimap shows the big map.
+    map_open: bool,
+    /// The minimap's corner, as `logic::corner` counts them.
+    corner: usize,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
@@ -118,6 +126,8 @@ static STATE: Mutex<State> = Mutex::new(State {
     busy: None,
     scroll: 0,
     zoom: None,
+    map_open: false,
+    corner: 1,
 });
 
 /// Messages for the next frame: the launcher threads can't reach the game.
@@ -859,9 +869,50 @@ pub(super) fn wheel(
     *canceled = true;
 }
 
+/// The minimap in the corner, or the big map (`native_minimap`'s hook).
+pub(super) fn minimap_view(minimap: &mut Option<crate::game::native_hooks::NativeMinimap>) {
+    if minimap.is_some() {
+        return;
+    }
+    let (open, corner) = {
+        let state = state();
+        (state.map_open, state.corner)
+    };
+    let (size, blocks_per_pixel) = logic::minimap(open);
+    *minimap = Some(crate::game::native_hooks::NativeMinimap {
+        corner: match logic::corner(corner) {
+            0 => crate::mod_api::Corner::TopLeft,
+            2 => crate::mod_api::Corner::BottomLeft,
+            3 => crate::mod_api::Corner::BottomRight,
+            _ => crate::mod_api::Corner::TopRight,
+        },
+        size,
+        blocks_per_pixel,
+        rotate: false,
+        round: false,
+    });
+}
+
 /// The key: open (or close) the switch screen (`native_key`'s hook).
 pub(super) fn on_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
     if !game.native_window() {
+        return;
+    }
+    // The map key: the minimap opens into the big map and back.
+    if key == game.native_mod_key(ID, MAP_KEY, MAP_DEFAULT) {
+        if !pressed || !game.native_playing() {
+            return;
+        }
+        let open = {
+            let mut state = state();
+            state.map_open = !state.map_open;
+            state.map_open
+        };
+        tell(if open {
+            "Account Switch: big map on"
+        } else {
+            "Account Switch: big map off"
+        });
         return;
     }
     // The zoom key: held while playing, as OptiFine's zoom.
@@ -928,6 +979,11 @@ pub(super) fn listed(mods: &mut Vec<crate::game::native_hooks::NativeMod>) {
                 "Zoom (hold)".to_owned(),
                 ZOOM_DEFAULT.to_owned(),
             ],
+            [
+                MAP_KEY.to_owned(),
+                "Minimap: big map".to_owned(),
+                MAP_DEFAULT.to_owned(),
+            ],
         ],
     });
 }
@@ -944,6 +1000,11 @@ pub(super) fn page(mod_id: &str, buttons: &mut Vec<String>) {
         refresh_accounts();
     }
     buttons.extend(view.rows().into_iter().map(|(_, label)| label));
+    // Below the accounts: which corner the minimap shows in.
+    buttons.push(format!(
+        "Minimap corner: {} (click to move)",
+        logic::corner_name(state().corner)
+    ));
 }
 
 /// A click on the page (`native_settings_click`'s hook).
@@ -953,6 +1014,17 @@ pub(super) fn clicked_page(game: &mut crate::game::Game<'_>, mod_id: &str, butto
     }
     let view = view();
     let rows = view.rows();
+    if button >= rows.len() {
+        // The corner row: the next corner.
+        let mut state = state();
+        state.corner = logic::corner(state.corner + 1);
+        let name = logic::corner_name(state.corner);
+        drop(state);
+        game.system_message(horizon_client::text::Text::literal(format!(
+            "Account Switch: minimap corner {name}"
+        )));
+        return;
+    }
     let Some((action, _)) = rows.get(button).cloned() else {
         return;
     };

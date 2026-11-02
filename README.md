@@ -53,6 +53,18 @@ Horizon's, not a copy of them.
 **With Horizon's official Zoom mod installed, remove one of the two**: both answer `native_zoom`, and the
 first one to answer wins, so the keys would disagree about what they do.
 
+## Minimap and map
+
+The mod answers the game's own `native_minimap`, so the terrain, colours and chunk drawing are Horizon's:
+
+- a **minimap** in a corner (top right by default; Options → Mods → Account Switch moves it),
+- the **map key** (M by default) grows it into the biggest map the game allows: 256 GUI pixels across,
+  4 blocks to a pixel, so about a thousand blocks from side to side. Press it again for the corner map.
+
+The game clamps both (16..=256 pixels, 0.5..=4 blocks per pixel), so a request outside that is simply
+brought back into it. **With Horizon's official Minimap mod, keep one of the two**: both answer the hook and
+the first one to answer wins.
+
 ## What it needs
 
 - Horizon with native-mod support (the launcher that builds native mods), Minecraft 26.3.

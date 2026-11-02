@@ -193,6 +193,37 @@ pub const BAR: f32 = 8.0;
 /// The margin the panel keeps from the window's edge.
 pub const MARGIN: f32 = 12.0;
 
+/// The minimap in the corner: its side, and how many blocks one map pixel
+/// covers. The game keeps both in range (16..=256 GUI pixels, 0.5..=4 blocks).
+pub const MINIMAP: f32 = 72.0;
+pub const MINIMAP_BLOCKS: f32 = 1.0;
+/// The big map the map key opens: as large as the game allows, and far out.
+pub const MAP: f32 = 256.0;
+pub const MAP_BLOCKS: f32 = 4.0;
+
+/// The minimap's side and zoom: the corner one, or the big map.
+pub fn minimap(open: bool) -> (f32, f32) {
+    if open {
+        (MAP, MAP_BLOCKS)
+    } else {
+        (MINIMAP, MINIMAP_BLOCKS)
+    }
+}
+
+/// The four corners, in the order the settings row cycles them.
+pub fn corner(index: usize) -> usize {
+    index % 4
+}
+
+pub fn corner_name(index: usize) -> &'static str {
+    match corner(index) {
+        0 => "top left",
+        1 => "top right",
+        2 => "bottom left",
+        _ => "bottom right",
+    }
+}
+
 /// The zoom the key starts at, how far the wheel takes it, and its limits.
 pub const ZOOM_START: f32 = 4.0;
 pub const ZOOM_MIN: f32 = 1.25;
@@ -434,6 +465,22 @@ mod tests {
         assert!(p[1] + p[3] <= window[1] - MARGIN + 0.5);
         // A narrow window still gets a usable panel.
         assert!(panel([200.0, 203.0], 3)[2] >= 180.0);
+    }
+
+    #[test]
+    fn the_big_map_is_larger_and_further_out_than_the_corner_one() {
+        let (side, blocks) = minimap(false);
+        let (big_side, big_blocks) = minimap(true);
+        assert!(big_side > side);
+        assert!(big_blocks > blocks);
+        // Both stay inside what the game accepts (16..=256, 0.5..=4).
+        for (side, blocks) in [minimap(false), minimap(true)] {
+            assert!((16.0..=256.0).contains(&side), "side {side}");
+            assert!((0.5..=4.0).contains(&blocks), "blocks {blocks}");
+        }
+        assert_eq!(corner(4), 0);
+        assert_eq!(corner_name(0), "top left");
+        assert_eq!(corner_name(3), "bottom right");
     }
 
     #[test]
