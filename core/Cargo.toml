@@ -1,0 +1,11 @@
+[package]
+name = "horizon-account-switch-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+description = "Account Switch's logic without the game: the launcher's accounts, the next one, the page's buttons."
+
+[dependencies]
+serde_json = "1"

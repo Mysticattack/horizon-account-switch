@@ -1,0 +1,112 @@
+[mod]
+id = "account_switch"
+version = "0.1.0"
+priority = 100
+
+# The commit this bundle was written and built against. `horizon-launcher
+# native-build` uses that commit's source (the Nightly it came from) and says so
+# when the instance plays another.
+[compatibility]
+horizon_revision = "97dc1b553b3275dd83415616b2db13e1ed0916e5"
+
+# The mod's own crate: the launcher's answers, the next account, the page's rows.
+[[crate]]
+id = "core"
+path = "core"
+dependent = "horizon-client"
+
+# The game-side module: `crate::game::account_switch`.
+[[module]]
+id = "module"
+file = "crates/horizon-client/src/game.rs"
+name = "account_switch"
+source = "module.rs"
+
+# The session the game plays as lives in `crate::auth::account_switch`: the
+# game's own at start, another account's after a switch.
+[[module]]
+id = "slot"
+file = "crates/horizon-client-render/src/auth.rs"
+name = "account_switch"
+source = "slot.rs"
+
+# `set_current` installs the session there instead of the one-shot static;
+# `current` answers with it. Everything that asks who is playing (the join's
+# session service, the profile, the skins, the chat keys) follows.
+[[injection]]
+id = "set_current"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client_render::auth::set_current"
+helper = "set_current.rs"
+bindings = [{ name = "session", ty = "&crate::auth::AuthSession", value = "&session" }]
+
+[[injection]]
+id = "current"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client_render::auth::current"
+helper = "current.rs"
+
+# Once a frame on the window's own game: take over a fetched session, leave the
+# server for it and join it again.
+[[injection]]
+id = "frame"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_frame"
+helper = "frame.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }]
+
+# The switch key.
+[[injection]]
+id = "key"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_key"
+helper = "key.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "key", ty = "&str", value = "key" },
+  { name = "pressed", ty = "bool", value = "pressed" },
+]
+
+# The row in Options > Mods.
+[[injection]]
+id = "mods"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_mods"
+helper = "mods.rs"
+bindings = [{ name = "mods", ty = "&mut Vec<crate::game::native_hooks::NativeMod>", value = "&mut *mods" }]
+
+# The mod's settings page: a row per signed-in account.
+[[injection]]
+id = "settings"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_settings"
+helper = "settings.rs"
+bindings = [
+  { name = "mod_id", ty = "&str", value = "mod_id" },
+  { name = "buttons", ty = "&mut Vec<String>", value = "&mut *buttons" },
+]
+
+[[injection]]
+id = "click"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_settings_click"
+helper = "click.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "mod_id", ty = "&str", value = "mod_id" },
+  { name = "button", ty = "usize", value = "button" },
+]
+
+# Every server join keeps its address, for the switch to join it again.
+[[injection]]
+id = "join"
+kind = "HEAD"
+target = "horizon_client::game::remote::Game<'_>::connect_server_with_options"
+helper = "join.rs"
+bindings = [
+  { name = "address", ty = "&str", value = "address" },
+  { name = "name", ty = "&str", value = "name" },
+]
+
