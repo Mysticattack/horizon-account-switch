@@ -28,7 +28,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.13.0";
+pub const VERSION: &str = "0.14.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -1033,8 +1033,9 @@ pub(super) fn refresh_map(game: &mut crate::game::Game<'_>) {
         state.map_built = Some((center, zoom));
         state.map_at = Some(std::time::Instant::now());
         state.map_debug = format!(
-            "{loaded}/{} loaded · slot {} · image {} · {debug}",
+            "{loaded}/{} loaded · chunks {} · slot {} · image {} · {debug}",
             texels as usize * texels as usize,
+            game.world.chunks.len(),
             if game.gui.atlas.sprites.contains_key(MAP_SPRITE) {
                 "ok"
             } else {
@@ -1063,7 +1064,8 @@ pub(super) fn hud_post(
     layer: &str,
     batch: &mut crate::hud::HudBatch,
 ) {
-    if layer != "hotbar" || !game.native_playing() {
+    // The game names its layers with the namespace: `minecraft:hotbar`.
+    if !(layer == "minecraft:hotbar" || layer == "hotbar") || !game.native_playing() {
         return;
     }
     let (ready, corner) = {
