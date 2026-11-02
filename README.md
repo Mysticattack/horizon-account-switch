@@ -56,8 +56,9 @@ first one to answer wins, so the keys would disagree about what they do.
 ## Minimap and world map
 
 Both are drawn from the mod's own map image: the surface height of every column in reach, in vanilla's map
-colours (`MAP_COLORS`), uploaded once into `horizon/modimage` (`native_mod_image`, API 355) and refreshed
-when the player moved 8 texels, the zoom changed or 10 seconds passed.
+colours (`MAP_COLORS`), written into the game's own minimap slot (`horizon/minimap`, 128 square) and
+refreshed when the player moved 8 texels, the zoom changed or 10 seconds passed. `native_mod_image` is not
+used: its image slot only exists when a *trait* mod is loaded, and a mixin bundle never is one.
 
 - **Minimap**: the image's middle 64 texels, 72 GUI pixels, in a corner (top right by default; the mod's
   page moves it), with a two-pixel frame and a red dot for the player. Drawn after the hotbar's HUD layer

@@ -28,7 +28,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.11.0";
+pub const VERSION: &str = "0.12.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -111,6 +111,8 @@ struct State {
     map_at: Option<std::time::Instant>,
     /// The texture holds a built map.
     map_ready: bool,
+    /// The build said what it found, once.
+    map_said: bool,
     /// The minimap's corner, as `logic::corner` counts them.
     corner: usize,
 }
@@ -137,6 +139,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     map_built: None,
     map_at: None,
     map_ready: false,
+    map_said: false,
     corner: 1,
 });
 
@@ -912,8 +915,10 @@ pub(super) fn wheel(
     *canceled = true;
 }
 
-/// The map texture's sprite name: what `native_mod_image` fills.
-const MAP_SPRITE: &str = "horizon/modimage";
+/// The map texture's sprite: the game's own minimap slot. A bundle's
+/// `native_mod_image` needs a *trait* mod's image slot, which a mixin bundle
+/// never gets; this slot is always there, so the map is written into it.
+const MAP_SPRITE: &str = crate::hud::MINIMAP_SPRITE;
 /// What the map shows where no chunk is loaded (as an image pixel, and as a
 /// fill for the frame before the first image is built).
 const MAP_UNKNOWN: [u8; 4] = [24, 24, 28, 255];
@@ -967,6 +972,7 @@ pub(super) fn refresh_map(game: &mut crate::game::Game<'_>) {
     let half = (texels / 2) as i32;
     let step = zoom as i32;
     let mut rgba = vec![0u8; (texels * texels * 4) as usize];
+    let mut loaded = 0usize;
     {
         let world = &game.world;
         let facts = game.res.facts();
@@ -976,6 +982,7 @@ pub(super) fn refresh_map(game: &mut crate::game::Game<'_>) {
                 let x = center.0 + (column as i32 - half) * step;
                 let z = center.1 + (row as i32 - half) * step;
                 let pixel = if world.loaded(x, z) {
+                    loaded += 1;
                     let surface = world.world_surface(x, z, is_air);
                     let block = world.block(x, surface - 1, z);
                     let colour = facts
@@ -991,11 +998,42 @@ pub(super) fn refresh_map(game: &mut crate::game::Game<'_>) {
             }
         }
     }
-    let uploaded = game.native_mod_image(texels, texels, &rgba);
-    let mut state = state();
-    state.map_ready = uploaded;
-    state.map_built = Some((center, zoom));
-    state.map_at = Some(std::time::Instant::now());
+    // The patch goes into the minimap slot's own pixels, as the engine's
+    // minimap would write it.
+    let uploaded = match game.gui.atlas.sprites.get(MAP_SPRITE).copied() {
+        Some(rect) => {
+            let (width, height) = (
+                game.gui.atlas.width as f32,
+                game.gui.atlas.height as f32,
+            );
+            game.map_patches.push(horizon_client::font::Patch {
+                x: (rect.u0 * width).round() as u32,
+                y: (rect.v0 * height).round() as u32,
+                width: texels,
+                height: texels,
+                rgba,
+            });
+            true
+        }
+        None => false,
+    };
+    let said = {
+        let mut state = state();
+        state.map_ready = uploaded;
+        state.map_built = Some((center, zoom));
+        state.map_at = Some(std::time::Instant::now());
+        let first = !state.map_said;
+        state.map_said = true;
+        first
+    };
+    if said {
+        // Once, so a map that stays dark says why.
+        tell(format!(
+            "Account Switch map: {loaded} of {} columns loaded, image {}",
+            texels as usize * texels as usize,
+            if uploaded { "written" } else { "missing" }
+        ));
+    }
 }
 
 /// The minimap in its corner, over the hotbar's HUD layer

@@ -193,15 +193,15 @@ pub const BAR: f32 = 8.0;
 /// The margin the panel keeps from the window's edge.
 pub const MARGIN: f32 = 12.0;
 
-/// The map texture's side in texels: built once around the player and drawn
-/// both in the corner and on the big map.
-pub const TEXELS: u32 = 256;
+/// The map texture's side in texels: the game's minimap slot is 128 square, so
+/// `native_mod_image` is not needed at all — the map goes into that slot.
+pub const TEXELS: u32 = 128;
 /// The corner minimap's side in GUI pixels, and the texels it shows of the map.
 pub const MINIMAP: f32 = 72.0;
 pub const MINIMAP_TEXELS: f32 = 64.0;
 /// The closest and furthest a texel can be, in blocks.
 pub const MAP_ZOOM_MIN: u32 = 1;
-pub const MAP_ZOOM_MAX: u32 = 16;
+pub const MAP_ZOOM_MAX: u32 = 32;
 
 /// The next zoom in or out: powers of two inside the limits.
 pub fn zoom_in(zoom: u32) -> u32 {
@@ -503,13 +503,13 @@ mod tests {
     #[test]
     fn the_map_zoom_moves_in_powers_of_two_and_stops_at_its_limits() {
         assert_eq!(zoom_in(1), 2);
-        assert_eq!(zoom_in(16), MAP_ZOOM_MAX);
+        assert_eq!(zoom_in(32), MAP_ZOOM_MAX);
         assert_eq!(zoom_out(2), 1);
         assert_eq!(zoom_out(1), MAP_ZOOM_MIN);
-        assert_eq!(map_blocks(1), 256);
-        assert_eq!(map_blocks(16), 4096);
+        assert_eq!(map_blocks(1), 128);
+        assert_eq!(map_blocks(32), 4096);
         // The corner map shows the middle 64 texels of the same image.
-        assert_eq!(minimap_crop(), [96.0, 96.0, 64.0, 64.0]);
+        assert_eq!(minimap_crop(), [32.0, 32.0, 64.0, 64.0]);
         assert_eq!(corner(4), 0);
         assert_eq!(corner_name(0), "top left");
         assert_eq!(corner_name(3), "bottom right");

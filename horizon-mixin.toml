@@ -1,6 +1,6 @@
 [mod]
 id = "account_switch"
-version = "0.11.0"
+version = "0.12.0"
 priority = 100
 
 # The commit this bundle was written and built against. `horizon-launcher
