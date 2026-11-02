@@ -24,13 +24,15 @@ use std::{
 
 use horizon_account_switch_core as logic;
 use horizon_client::auth::AuthSession;
+use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.2.0";
+pub const VERSION: &str = "0.3.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
-     Microsoft sign-in. The game leaves the server and joins it again as the other account.";
+     Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
+     again as the other account.";
 /// The key's name and its default: nothing vanilla uses.
 pub const KEY: &str = "switch";
 pub const DEFAULT_KEY: &str = "key.keyboard.f9";
@@ -86,6 +88,8 @@ struct State {
     sign_in_running: bool,
     /// The screen's one line about what happened last.
     status: Option<String>,
+    /// A code to put on the clipboard on the next frame (the screen can't).
+    copy: Option<String>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
@@ -101,6 +105,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     sign_in: None,
     sign_in_running: false,
     status: None,
+    copy: None,
 });
 
 /// Messages for the next frame: the launcher threads can't reach the game.
@@ -150,6 +155,30 @@ fn run_launcher(args: &[&str]) -> Result<String, String> {
     } else {
         stderr
     })
+}
+
+/// Opens `link` in the player's browser: the sign-in page, so the code can be
+/// pasted there without typing the address.
+fn open_page(link: &str) {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", ""]);
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = Command::new("xdg-open");
+    match command
+        .arg(link)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(_) => {}
+        Err(error) => log::warn!("Account Switch: could not open {link}: {error}"),
+    }
 }
 
 /// Asks the launcher for its accounts, in the background: reading the keychain
@@ -230,13 +259,20 @@ fn add_account(target: Option<String>) {
         if let Some(errors) = child.stderr.take() {
             for line in BufReader::new(errors).lines().map_while(Result::ok) {
                 if let Some((link, code)) = logic::parse_sign_in(&line) {
-                    let mut state = state();
-                    state.sign_in = Some(SignIn {
-                        target: target.clone(),
-                        link,
-                        code,
-                    });
-                    state.status = Some("enter the code, then this list updates".to_owned());
+                    // The page opens here, the code goes to the clipboard on
+                    // the next frame (this thread can't reach the game).
+                    open_page(&link);
+                    {
+                        let mut state = state();
+                        state.sign_in = Some(SignIn {
+                            target: target.clone(),
+                            link,
+                            code: code.clone(),
+                        });
+                        state.copy = Some(code);
+                        state.status =
+                            Some("the code is copied: paste it on the page, this list follows".to_owned());
+                    }
                 }
             }
         }
@@ -284,6 +320,12 @@ pub(super) fn pump(game: &mut crate::game::Game<'_>) {
         .drain(..)
     {
         game.system_message(horizon_client::text::Text::literal(line));
+    }
+    // A sign-in's code goes to the system clipboard: the screen is `&self`
+    // and can't, this frame can.
+    let copy = state().copy.take();
+    if let Some(code) = copy {
+        game.clipboard.set(&code);
     }
     let first = {
         let mut state = state();
@@ -366,6 +408,8 @@ pub(crate) enum Action {
     Switch(usize),
     /// Start a Microsoft sign-in for a new account.
     Add,
+    /// Put the running sign-in's code on the clipboard again.
+    Copy,
 }
 
 /// What the screen shows, read in one go.
@@ -404,6 +448,9 @@ impl View {
             rows.push((Action::Switch(index), label));
         }
         rows.push((Action::Add, "+ Add account (Microsoft sign-in)".to_owned()));
+        if let Some(sign_in) = &self.sign_in {
+            rows.push((Action::Copy, format!("Copy code {}", sign_in.code)));
+        }
         rows
     }
 }
@@ -446,17 +493,17 @@ pub(super) fn draw(
     }
     let view = view();
     let rows = view.rows();
-    let window = [screen.rect[2], screen.rect[3]];
+    let window = [screen.rect[0] + screen.rect[2], screen.rect[1] + screen.rect[3]];
     let panel = logic::panel(window, rows.len());
     let host: &dyn crate::mod_api::Host = game;
     host.fill(batch, [0.0, 0.0, window[0], window[1]], SHADE);
     host.fill(batch, panel, PANEL);
     // The border: four thin fills, the panel's edge.
     let [x, y, width, height] = panel;
-    host.fill(batch, [x, y, x + width, y + 1.0], BORDER);
-    host.fill(batch, [x, y + height - 1.0, x + width, y + height], BORDER);
-    host.fill(batch, [x, y, x + 1.0, y + height], BORDER);
-    host.fill(batch, [x + width - 1.0, y, x + width, y + height], BORDER);
+    host.fill(batch, [x, y, width, 1.0], BORDER);
+    host.fill(batch, [x, y + height - 1.0, width, 1.0], BORDER);
+    host.fill(batch, [x, y, 1.0, height], BORDER);
+    host.fill(batch, [x + width - 1.0, y, 1.0, height], BORDER);
     host.text(batch, TITLE, [x + 8.0, y + 8.0], TITLE_TEXT, true);
     let hovered = logic::hit(panel, rows.len(), screen.mouse);
     for (index, (action, label)) in rows.iter().enumerate() {
@@ -548,6 +595,12 @@ pub(super) fn clicked(
             }
         }
         Action::Add => add_account(None),
+        Action::Copy => {
+            if let Some(sign_in) = view.sign_in.clone() {
+                state().copy = Some(sign_in.code);
+                set_status("code copied");
+            }
+        }
     }
     let _ = label;
 }
@@ -635,5 +688,10 @@ pub(super) fn clicked_page(game: &mut crate::game::Game<'_>, mod_id: &str, butto
             }
         }
         Action::Add => add_account(None),
+        Action::Copy => {
+            if let Some(sign_in) = view.sign_in.clone() {
+                state().copy = Some(sign_in.code);
+            }
+        }
     }
 }

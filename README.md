@@ -14,8 +14,9 @@ horizon-launcher native-build horizon-account-switch --trust-native-code
 Der erste Build lädt Rust und kompiliert das Spiel (20–30 Minuten), später geht es schneller.
 Danach die Instanz starten, die er gebaut hat, und im Spiel **F9** drücken (Taste änderbar unter
 Options → Mods → Account Switch): es öffnet sich ein Fenster mit einer Zeile pro eingeloggtem
-Account — anklicken, fertig. Die Zeile **+ Add account** startet eine Microsoft-Anmeldung und zeigt
-den Code direkt im Fenster an; danach steht der neue Account in der Liste. **Esc** schließt.
+Account — anklicken, fertig. Die Zeile **+ Add account** startet eine Microsoft-Anmeldung, **öffnet
+die Anmeldeseite im Browser und legt den Code in die Zwischenablage** (Zeile `Copy code …` kopiert
+ihn noch einmal), danach steht der neue Account in der Liste. **Esc** schließt.
 
 Voraussetzung: im Launcher sind mindestens zwei Microsoft-Accounts eingeloggt (einer davon mit
 Java Edition). Native Mods laufen mit deinen Rechten und sind nicht sandboxed — genau dafür ist
@@ -29,7 +30,8 @@ on, the session service's join, the profile, the skins and the chat keys belong 
 
 - The **switch key** (F9 by default, set in the mod's page) opens the mod's own screen: one row per
   signed-in account (`Play as <name>`, `Refresh list`), **+ Add account** for a Microsoft sign-in, and
-  the sign-in's code and link right there. Escape closes it.
+  the sign-in's code and link right there. Escape closes it. The sign-in's page opens in the browser
+  and its code is put on the clipboard, ready to paste; `Copy code …` copies it again.
 - **Options → Mods → Account Switch** carries the same rows as a settings page.
 - Chat says what is happening (`Account Switch: playing as …`, `joining <server> again`).
 
