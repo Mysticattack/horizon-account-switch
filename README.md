@@ -53,17 +53,22 @@ Horizon's, not a copy of them.
 **With Horizon's official Zoom mod installed, remove one of the two**: both answer `native_zoom`, and the
 first one to answer wins, so the keys would disagree about what they do.
 
-## Minimap and map
+## Minimap and world map
 
-The mod answers the game's own `native_minimap`, so the terrain, colours and chunk drawing are Horizon's:
+Both are drawn from the mod's own map image: the surface height of every column in reach, in vanilla's map
+colours (`MAP_COLORS`), uploaded once into `horizon/modimage` (`native_mod_image`, API 355) and refreshed
+when the player moved 8 texels, the zoom changed or 10 seconds passed.
 
-- a **minimap** in a corner (top right by default; Options → Mods → Account Switch moves it),
-- the **map key** (M by default) grows it into the biggest map the game allows: 256 GUI pixels across,
-  4 blocks to a pixel, so about a thousand blocks from side to side. Press it again for the corner map.
+- **Minimap**: the image's middle 64 texels, 72 GUI pixels, in a corner (top right by default; the mod's
+  page moves it), with a two-pixel frame and a red dot for the player. Drawn after the hotbar's HUD layer
+  (`native_gui_layer_post`, API 139), so it does not replace or double the game's own minimap — the game's
+  is off while this mod is installed, because the mod no longer answers `native_minimap`.
+- **World map** (`M`): the whole 256-texel image, as large as the window allows, with the player in the
+  middle and the scale in blocks per pixel. The wheel zooms out and in, 1 to 16 blocks to a texel — a whole
+  4096 blocks across at the farthest. Only loaded chunks have colours; the rest is dark.
 
-The game clamps both (16..=256 pixels, 0.5..=4 blocks per pixel), so a request outside that is simply
-brought back into it. **With Horizon's official Minimap mod, keep one of the two**: both answer the hook and
-the first one to answer wins.
+With Horizon's official Minimap mod there is no clash any more: that one answers `native_minimap` and draws
+the game's minimap, this one draws its own image over the HUD.
 
 ## What it needs
 

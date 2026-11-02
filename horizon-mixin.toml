@@ -1,6 +1,6 @@
 [mod]
 id = "account_switch"
-version = "0.10.0"
+version = "0.11.0"
 priority = 100
 
 # The commit this bundle was written and built against. `horizon-launcher
@@ -155,14 +155,16 @@ bindings = [
   { name = "claimed", ty = "&mut bool", value = "&mut *claimed" },
 ]
 
-# The minimap in the corner, and the big map the map key opens.
+# The minimap, drawn over the hotbar's HUD layer (API 139).
 [[injection]]
-id = "minimap"
+id = "hud"
 kind = "HEAD"
-target = "horizon_client::game::native_hooks::Game<'_>::native_minimap"
-helper = "minimap.rs"
+target = "horizon_client::game::native_hooks::Game<'_>::native_gui_layer_post"
+helper = "hud.rs"
 bindings = [
-  { name = "minimap", ty = "&mut Option<crate::game::native_hooks::NativeMinimap>", value = "&mut *minimap" },
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "layer", ty = "&str", value = "layer" },
+  { name = "batch", ty = "&mut crate::hud::HudBatch", value = "&mut *batch" },
 ]
 
 # Every server join keeps its address, for the switch to join it again.

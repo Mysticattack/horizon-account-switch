@@ -193,21 +193,54 @@ pub const BAR: f32 = 8.0;
 /// The margin the panel keeps from the window's edge.
 pub const MARGIN: f32 = 12.0;
 
-/// The minimap in the corner: its side, and how many blocks one map pixel
-/// covers. The game keeps both in range (16..=256 GUI pixels, 0.5..=4 blocks).
+/// The map texture's side in texels: built once around the player and drawn
+/// both in the corner and on the big map.
+pub const TEXELS: u32 = 256;
+/// The corner minimap's side in GUI pixels, and the texels it shows of the map.
 pub const MINIMAP: f32 = 72.0;
-pub const MINIMAP_BLOCKS: f32 = 1.0;
-/// The big map the map key opens: as large as the game allows, and far out.
-pub const MAP: f32 = 256.0;
-pub const MAP_BLOCKS: f32 = 4.0;
+pub const MINIMAP_TEXELS: f32 = 64.0;
+/// The closest and furthest a texel can be, in blocks.
+pub const MAP_ZOOM_MIN: u32 = 1;
+pub const MAP_ZOOM_MAX: u32 = 16;
 
-/// The minimap's side and zoom: the corner one, or the big map.
-pub fn minimap(open: bool) -> (f32, f32) {
-    if open {
-        (MAP, MAP_BLOCKS)
+/// The next zoom in or out: powers of two inside the limits.
+pub fn zoom_in(zoom: u32) -> u32 {
+    (zoom * 2).min(MAP_ZOOM_MAX)
+}
+
+pub fn zoom_out(zoom: u32) -> u32 {
+    (zoom / 2).max(MAP_ZOOM_MIN)
+}
+
+/// How many blocks one side of the map image covers.
+pub fn map_blocks(zoom: u32) -> i32 {
+    TEXELS as i32 * zoom.max(1) as i32
+}
+
+/// The part of the map texture the corner minimap shows: `MINIMAP_TEXELS`
+/// square, centred.
+pub fn minimap_crop() -> [f32; 4] {
+    let start = (TEXELS as f32 - MINIMAP_TEXELS) / 2.0;
+    [start, start, MINIMAP_TEXELS, MINIMAP_TEXELS]
+}
+
+/// Where the corner minimap sits in a window: the game keeps its extras two
+/// pixels from the edge.
+pub fn minimap_at(window: [f32; 2], index: usize, side: f32) -> [f32; 2] {
+    const EDGE: f32 = 2.0;
+    let left = matches!(corner(index), 0 | 2);
+    let top = matches!(corner(index), 0 | 1);
+    let x = if left {
+        EDGE
     } else {
-        (MINIMAP, MINIMAP_BLOCKS)
-    }
+        (window[0] - EDGE - side).max(0.0)
+    };
+    let y = if top {
+        EDGE
+    } else {
+        (window[1] - EDGE - side).max(0.0)
+    };
+    [x, y]
 }
 
 /// The four corners, in the order the settings row cycles them.
@@ -468,19 +501,30 @@ mod tests {
     }
 
     #[test]
-    fn the_big_map_is_larger_and_further_out_than_the_corner_one() {
-        let (side, blocks) = minimap(false);
-        let (big_side, big_blocks) = minimap(true);
-        assert!(big_side > side);
-        assert!(big_blocks > blocks);
-        // Both stay inside what the game accepts (16..=256, 0.5..=4).
-        for (side, blocks) in [minimap(false), minimap(true)] {
-            assert!((16.0..=256.0).contains(&side), "side {side}");
-            assert!((0.5..=4.0).contains(&blocks), "blocks {blocks}");
-        }
+    fn the_map_zoom_moves_in_powers_of_two_and_stops_at_its_limits() {
+        assert_eq!(zoom_in(1), 2);
+        assert_eq!(zoom_in(16), MAP_ZOOM_MAX);
+        assert_eq!(zoom_out(2), 1);
+        assert_eq!(zoom_out(1), MAP_ZOOM_MIN);
+        assert_eq!(map_blocks(1), 256);
+        assert_eq!(map_blocks(16), 4096);
+        // The corner map shows the middle 64 texels of the same image.
+        assert_eq!(minimap_crop(), [96.0, 96.0, 64.0, 64.0]);
         assert_eq!(corner(4), 0);
         assert_eq!(corner_name(0), "top left");
         assert_eq!(corner_name(3), "bottom right");
+    }
+
+    #[test]
+    fn the_minimap_sits_in_its_corner_two_pixels_from_the_edge() {
+        let window = [352.0, 203.0];
+        assert_eq!(minimap_at(window, 0, 72.0), [2.0, 2.0]);
+        assert_eq!(minimap_at(window, 1, 72.0), [352.0 - 2.0 - 72.0, 2.0]);
+        assert_eq!(minimap_at(window, 2, 72.0), [2.0, 203.0 - 2.0 - 72.0]);
+        assert_eq!(
+            minimap_at(window, 3, 72.0),
+            [352.0 - 2.0 - 72.0, 203.0 - 2.0 - 72.0]
+        );
     }
 
     #[test]

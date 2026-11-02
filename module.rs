@@ -28,12 +28,12 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.10.0";
+pub const VERSION: &str = "0.11.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
      again as the other account. Hold the zoom key to zoom in (the wheel changes how far), and press the map \
-     key for the minimap's big map.";
+     key for the world map.";
 /// The key's name and its default: nothing vanilla uses.
 pub const KEY: &str = "switch";
 pub const DEFAULT_KEY: &str = "key.keyboard.f9";
@@ -103,8 +103,14 @@ struct State {
     scroll: usize,
     /// Held zoom factor while the zoom key is down.
     zoom: Option<f32>,
-    /// The map key was pressed: the minimap shows the big map.
+    /// The map key was pressed: the screen shows the world map.
     map_open: bool,
+    /// Blocks per map texel, and the image built for which centre and zoom.
+    map_zoom: u32,
+    map_built: Option<((i32, i32), u32)>,
+    map_at: Option<std::time::Instant>,
+    /// The texture holds a built map.
+    map_ready: bool,
     /// The minimap's corner, as `logic::corner` counts them.
     corner: usize,
 }
@@ -127,6 +133,10 @@ static STATE: Mutex<State> = Mutex::new(State {
     scroll: 0,
     zoom: None,
     map_open: false,
+    map_zoom: 2,
+    map_built: None,
+    map_at: None,
+    map_ready: false,
     corner: 1,
 });
 
@@ -384,6 +394,17 @@ pub(super) fn pump(game: &mut crate::game::Game<'_>) {
     if let Some(code) = copy {
         game.clipboard.set(&code);
     }
+    // The world map: built while it is open or the minimap shows it, and
+    // forgotten when its screen went away (Escape).
+    {
+        let open = state().map_open;
+        if open && game.native_mod_screen() != Some(ID) {
+            state().map_open = false;
+        }
+    }
+    if game.native_playing() {
+        refresh_map(game);
+    }
     let first = {
         let mut state = state();
         let first = !state.started;
@@ -620,6 +641,10 @@ pub(super) fn draw(
     if game.native_mod_screen() != Some(ID) {
         return;
     }
+    if state().map_open {
+        draw_map(game, batch, screen);
+        return;
+    }
     let view = view();
     let rows = view.rows();
     let host: &dyn crate::mod_api::Host = game;
@@ -786,6 +811,10 @@ pub(super) fn clicked(
     if button != 0 || game.native_mod_screen() != Some(ID) {
         return;
     }
+    if state().map_open {
+        *canceled = true;
+        return;
+    }
     let view = view();
     let rows = view.rows();
     let window = [screen.rect[0] + screen.rect[2], screen.rect[1] + screen.rect[3]];
@@ -856,6 +885,20 @@ pub(super) fn wheel(
     if steps == 0 {
         return;
     }
+    if state().map_open {
+        {
+            let mut state = state();
+            for _ in 0..steps.abs() {
+                state.map_zoom = if steps > 0 {
+                    logic::zoom_out(state.map_zoom)
+                } else {
+                    logic::zoom_in(state.map_zoom)
+                };
+            }
+        }
+        *canceled = true;
+        return;
+    }
     let rows = view().rows().len();
     let window = [screen.rect[0] + screen.rect[2], screen.rect[1] + screen.rect[3]];
     let visible = logic::visible_rows(window);
@@ -869,28 +912,204 @@ pub(super) fn wheel(
     *canceled = true;
 }
 
-/// The minimap in the corner, or the big map (`native_minimap`'s hook).
-pub(super) fn minimap_view(minimap: &mut Option<crate::game::native_hooks::NativeMinimap>) {
-    if minimap.is_some() {
+/// The map texture's sprite name: what `native_mod_image` fills.
+const MAP_SPRITE: &str = "horizon/modimage";
+/// What the map shows where no chunk is loaded (as an image pixel, and as a
+/// fill for the frame before the first image is built).
+const MAP_UNKNOWN: [u8; 4] = [24, 24, 28, 255];
+const MAP_UNKNOWN_FILL: u32 = 0xFF_18_18_1C;
+
+/// One map pixel from a block's vanilla map colour id and its height.
+fn map_pixel(colour: u8, height: i32) -> [u8; 4] {
+    if colour == 0 {
+        return MAP_UNKNOWN;
+    }
+    let packed = crate::blocks::MAP_COLORS
+        .get(colour as usize)
+        .copied()
+        .unwrap_or(0);
+    if packed == 0 {
+        return MAP_UNKNOWN;
+    }
+    // A little shading by height, as vanilla's map item does.
+    let shade = (0.85 + height as f32 / 512.0).clamp(0.65, 1.15);
+    let channel = |shift: u32| (((packed >> shift) & 0xFF) as f32 * shade).min(255.0) as u8;
+    [channel(16), channel(8), channel(0), 255]
+}
+
+/// Whether the built map no longer matches where the player is and how far out
+/// they look.
+fn map_stale(center: (i32, i32), zoom: u32) -> bool {
+    let state = state();
+    let (Some((built, built_zoom)), Some(at)) = (&state.map_built, state.map_at) else {
+        return true;
+    };
+    let reach = 8 * zoom.max(1) as i32;
+    *built_zoom != zoom
+        || at.elapsed().as_secs() > 10
+        || (built.0 - center.0).abs() >= reach
+        || (built.1 - center.1).abs() >= reach
+}
+
+/// Builds the map around the player and uploads it, when it is stale: the
+/// surface of every column within reach, in vanilla's map colours
+/// (`native_mod_image`, API 355).
+pub(super) fn refresh_map(game: &mut crate::game::Game<'_>) {
+    let Some(position) = game.player.as_ref().map(|player| player.position) else {
+        return;
+    };
+    let center = (position.x.floor() as i32, position.z.floor() as i32);
+    let zoom = state().map_zoom.max(1);
+    if !map_stale(center, zoom) {
         return;
     }
-    let (open, corner) = {
+    let texels = logic::TEXELS;
+    let half = (texels / 2) as i32;
+    let step = zoom as i32;
+    let mut rgba = vec![0u8; (texels * texels * 4) as usize];
+    {
+        let world = &game.world;
+        let facts = game.res.facts();
+        let is_air = |block| facts.is_air(block);
+        for row in 0..texels {
+            for column in 0..texels {
+                let x = center.0 + (column as i32 - half) * step;
+                let z = center.1 + (row as i32 - half) * step;
+                let pixel = if world.loaded(x, z) {
+                    let surface = world.world_surface(x, z, is_air);
+                    let block = world.block(x, surface - 1, z);
+                    let colour = facts
+                        .states
+                        .get(block.0 as usize)
+                        .map_or(0, |state| state.map_color);
+                    map_pixel(colour, surface)
+                } else {
+                    MAP_UNKNOWN
+                };
+                let at = ((row * texels + column) * 4) as usize;
+                rgba[at..at + 4].copy_from_slice(&pixel);
+            }
+        }
+    }
+    let uploaded = game.native_mod_image(texels, texels, &rgba);
+    let mut state = state();
+    state.map_ready = uploaded;
+    state.map_built = Some((center, zoom));
+    state.map_at = Some(std::time::Instant::now());
+}
+
+/// The minimap in its corner, over the hotbar's HUD layer
+/// (`native_gui_layer_post`, API 139): the map's middle, with a frame.
+pub(super) fn hud_post(
+    game: &crate::game::Game<'_>,
+    layer: &str,
+    batch: &mut crate::hud::HudBatch,
+) {
+    if layer != "hotbar" || !game.native_playing() {
+        return;
+    }
+    let (ready, corner) = {
         let state = state();
-        (state.map_open, state.corner)
+        (state.map_ready, state.corner)
     };
-    let (size, blocks_per_pixel) = logic::minimap(open);
-    *minimap = Some(crate::game::native_hooks::NativeMinimap {
-        corner: match logic::corner(corner) {
-            0 => crate::mod_api::Corner::TopLeft,
-            2 => crate::mod_api::Corner::BottomLeft,
-            3 => crate::mod_api::Corner::BottomRight,
-            _ => crate::mod_api::Corner::TopRight,
-        },
-        size,
-        blocks_per_pixel,
-        rotate: false,
-        round: false,
-    });
+    if !ready {
+        return;
+    }
+    let host: &dyn crate::mod_api::Host = game;
+    let side = logic::MINIMAP;
+    let at = logic::minimap_at([batch.width, batch.height], corner, side);
+    host.sprite(
+        batch,
+        MAP_SPRITE,
+        logic::minimap_crop(),
+        [at[0], at[1], side, side],
+    );
+    // The frame: two pixels, dark outside and light inside, and the player.
+    draw_outline(host, batch, [at[0] - 2.0, at[1] - 2.0, side + 4.0, side + 4.0], 1.0, 0xFF10_10_14);
+    draw_outline(host, batch, [at[0] - 1.0, at[1] - 1.0, side + 2.0, side + 2.0], 1.0, 0xFF5A_5A_6A);
+    host.fill(
+        batch,
+        [at[0] + side / 2.0 - 1.0, at[1] + side / 2.0 - 1.0, 3.0, 3.0],
+        0xFF_FF_40_40,
+    );
+}
+
+/// Four one-pixel lines around `rect`.
+fn draw_outline(
+    host: &dyn crate::mod_api::Host,
+    batch: &mut crate::hud::HudBatch,
+    rect: [f32; 4],
+    thickness: f32,
+    rgb: u32,
+) {
+    let [x, y, width, height] = rect;
+    host.fill(batch, [x, y, width, thickness], rgb);
+    host.fill(batch, [x, y + height - thickness, width, thickness], rgb);
+    host.fill(batch, [x, y, thickness, height], rgb);
+    host.fill(batch, [x + width - thickness, y, thickness, height], rgb);
+}
+
+/// The world map over the world: the built image, its frame, and where the
+/// player is on it.
+fn draw_map(
+    game: &crate::game::Game<'_>,
+    batch: &mut crate::hud::HudBatch,
+    screen: &crate::mod_api::NativeScreenView<'_>,
+) {
+    let host: &dyn crate::mod_api::Host = game;
+    let window = [screen.rect[0] + screen.rect[2], screen.rect[1] + screen.rect[3]];
+    host.fill(batch, [0.0, 0.0, window[0], window[1]], VEIL);
+    let side = (window[0].min(window[1]) - 28.0).max(120.0);
+    let map = [(window[0] - side) / 2.0, (window[1] - side) / 2.0, side, side];
+    let (ready, zoom) = {
+        let state = state();
+        (state.map_ready, state.map_zoom)
+    };
+    if ready {
+        host.sprite(
+            batch,
+            MAP_SPRITE,
+            [0.0, 0.0, logic::TEXELS as f32, logic::TEXELS as f32],
+            map,
+        );
+    } else {
+        host.fill(batch, map, MAP_UNKNOWN_FILL);
+    }
+    draw_outline(host, batch, [map[0] - 2.0, map[1] - 2.0, map[2] + 4.0, map[3] + 4.0], 1.0, 0xFF10_10_14);
+    draw_outline(host, batch, [map[0] - 1.0, map[1] - 1.0, map[2] + 2.0, map[3] + 2.0], 1.0, 0xFF5A_5A_6A);
+    // The player, at the middle.
+    host.fill(
+        batch,
+        [
+            map[0] + map[2] / 2.0 - 2.0,
+            map[1] + map[3] / 2.0 - 2.0,
+            5.0,
+            5.0,
+        ],
+        0xFF_FF_40_40,
+    );
+    let title = format!(
+        "Map · {} blocks across · {} per pixel",
+        logic::map_blocks(zoom),
+        zoom
+    );
+    let title_width = game.native_text_width(&title);
+    host.text(
+        batch,
+        &title,
+        [map[0] + (map[2] - title_width) / 2.0, map[1] - 16.0],
+        TITLE_TEXT,
+        true,
+    );
+    let hint = "wheel zooms · M closes";
+    let hint_width = game.native_text_width(hint);
+    host.text(
+        batch,
+        hint,
+        [map[0] + (map[2] - hint_width) / 2.0, map[1] + map[3] + 6.0],
+        MUTED,
+        true,
+    );
 }
 
 /// The key: open (or close) the switch screen (`native_key`'s hook).
@@ -898,7 +1117,7 @@ pub(super) fn on_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool)
     if !game.native_window() {
         return;
     }
-    // The map key: the minimap opens into the big map and back.
+    // The map key: the world map opens and closes.
     if key == game.native_mod_key(ID, MAP_KEY, MAP_DEFAULT) {
         if !pressed || !game.native_playing() {
             return;
@@ -908,11 +1127,11 @@ pub(super) fn on_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool)
             state.map_open = !state.map_open;
             state.map_open
         };
-        tell(if open {
-            "Account Switch: big map on"
-        } else {
-            "Account Switch: big map off"
-        });
+        if open {
+            game.native_mod_screen_open(ID);
+        } else if game.native_mod_screen() == Some(ID) {
+            game.native_mod_screen_close(ID);
+        }
         return;
     }
     // The zoom key: held while playing, as OptiFine's zoom.
