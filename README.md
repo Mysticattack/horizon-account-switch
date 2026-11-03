@@ -62,7 +62,8 @@ mod is loaded).
 
 **Minimap** (`native_gui_layer_post`, layer `minecraft:hotbar`, API 139) — round, as Xaero's Minimap:
 
-- a disc of 64 cells cut to a circle (`logic::in_circle`), one block per cell, dark disc under it
+- a disc of 96 cells cut to a circle (`logic::in_circle`), one pixel per cell (96 blocks across), a
+dark disc under it — and nothing at all where a chunk is not loaded
 - a two-tone ring (dark outside, light inside) built from `logic::ring`'s small squares
 - compass letters `N` `E` `S` `W` around the ring
 - the player's arrow turned to the view (`logic::arrow`, a rasterised triangle with a shadow)

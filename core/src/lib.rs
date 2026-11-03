@@ -200,9 +200,9 @@ pub const TEXELS: u32 = 128;
 /// sharper instead of being the minimap drawn larger.
 pub const BIG: u32 = 160;
 /// The minimap's cells per side, at one block per cell.
-pub const MINI: u32 = 64;
+pub const MINI: u32 = 96;
 /// The corner minimap's side in GUI pixels, and the texels it shows of the map.
-pub const MINIMAP: f32 = 72.0;
+pub const MINIMAP: f32 = 96.0;
 pub const MINIMAP_TEXELS: f32 = MINI as f32;
 /// The closest and furthest a texel can be, in blocks.
 pub const MAP_ZOOM_MIN: u32 = 1;
@@ -590,7 +590,7 @@ mod tests {
         assert_eq!(map_blocks(1), 128);
         assert_eq!(map_blocks(32), 4096);
         // The corner map shows the middle 64 texels of the same image.
-        assert_eq!(minimap_crop(), [32.0, 32.0, 64.0, 64.0]);
+        assert_eq!(minimap_crop(), [16.0, 16.0, 96.0, 96.0]);
         assert_eq!(corner(4), 0);
         assert_eq!(corner_name(0), "top left");
         assert_eq!(corner_name(3), "bottom right");

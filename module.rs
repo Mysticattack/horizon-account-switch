@@ -28,7 +28,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.19.0";
+pub const VERSION: &str = "0.20.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -988,7 +988,9 @@ fn sample(
     let anchor = (logic::aligned(center.0, step), logic::aligned(center.1, step));
     let half_column = (cols / 2) as i32;
     let half_row = (rows / 2) as i32;
-    let mut grid = vec![MAP_UNKNOWN_FILL; (cols * rows) as usize];
+    // A cell stays zero where no chunk is loaded: nothing is drawn for it, so
+    // the world map shows its own dark background there, as Xaero's does.
+    let mut grid = vec![0u32; (cols * rows) as usize];
     let mut loaded = 0usize;
     let mut debug = String::from("centre: not loaded");
     let world = &game.world;
@@ -1156,11 +1158,14 @@ fn draw_grid(
                 continue;
             }
             let left = x + column as f32 * cell_width + offset[0];
-            let pixel = grid.get((row * cols + column) as usize).copied();
+            let pixel = grid.get((row * cols + column) as usize).copied().unwrap_or(0);
+            if pixel == 0 {
+                continue;
+            }
             host.fill(
                 batch,
                 [left, top, cell_width + 0.5, cell_height + 0.5],
-                pixel.unwrap_or(MAP_UNKNOWN_FILL),
+                pixel,
             );
         }
     }
@@ -1238,11 +1243,18 @@ pub(super) fn hud_post(
             ]
         })
         .unwrap_or([0.0, 0.0]);
-    // A dark disc under the map, so the round edge does not show the world.
-    for square in logic::ring(side + 2.0, side / 2.0, 48) {
+    // A dark disc under the map, one fill per row, so the round edge does not
+    // show the world and unloaded chunks have a background.
+    let radius = side / 2.0;
+    for row in 0..side as u32 {
+        let dy = row as f32 + 0.5 - radius;
+        let half = (radius * radius - dy * dy).max(0.0).sqrt();
+        if half <= 0.0 {
+            continue;
+        }
         host.fill(
             batch,
-            [at[0] - 1.0 + square[0], at[1] - 1.0 + square[1], square[2], square[3]],
+            [at[0] + radius - half, at[1] + row as f32, half * 2.0, 1.0],
             0xE0_08_08_0C,
         );
     }
@@ -1257,14 +1269,14 @@ pub(super) fn hud_post(
         offset,
     );
     // The frame: dark outside, light inside, as the minimap's ring.
-    for square in logic::ring(side + 4.0, 3.0, 48) {
+    for square in logic::ring(side + 4.0, 3.0, 96) {
         host.fill(
             batch,
             [at[0] - 2.0 + square[0], at[1] - 2.0 + square[1], square[2], square[3]],
             0xFF_1A_1A_20,
         );
     }
-    for square in logic::ring(side, 2.0, 48) {
+    for square in logic::ring(side, 2.0, 96) {
         host.fill(
             batch,
             [at[0] + square[0], at[1] + square[1], square[2], square[3]],
