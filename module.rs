@@ -29,7 +29,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.22.0";
+pub const VERSION: &str = "0.23.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -120,6 +120,8 @@ struct State {
     map_zoom: u32,
     /// The minimap's zoom: blocks per cell.
     mini_zoom: u32,
+    /// The minimap was too dear to draw last frame: draw it half as fine.
+    mini_coarse: bool,
     /// Every block the player has seen, one colour each, in tiles of
     /// `logic::TILE` blocks: the map keeps showing terrain after its chunk
     /// unloads, as Xaero's does. `tile_order` says which tile goes first when
@@ -134,6 +136,8 @@ struct State {
     /// Where the last exploration pass ran, and how often it may run, in
     /// milliseconds (42 is 24 times a second).
     explored_at: Option<((i32, i32), std::time::Instant)>,
+    /// When the last full pass ran; between passes only unseen blocks are read.
+    explored_full: Option<std::time::Instant>,
     mini_every: u128,
     /// How far the world map is dragged from the player, in blocks.
     pan: (i32, i32),
@@ -167,11 +171,13 @@ static STATE: Mutex<State> = Mutex::new(State {
     map_open: false,
     map_zoom: 1,
     mini_zoom: 1,
+    mini_coarse: false,
     tiles: BTreeMap::new(),
     tile_order: VecDeque::new(),
     parked: BTreeMap::new(),
     active: String::new(),
     explored_at: None,
+    explored_full: None,
     mini_every: 42,
     pan: (0, 0),
     waypoints: Vec::new(),
@@ -1093,6 +1099,14 @@ pub(super) fn explore(game: &mut crate::game::Game<'_>) {
             }
         }
     }
+    // A full pass refreshes changed blocks; between passes only blocks never
+    // seen are sampled, so walking costs a strip instead of the whole square.
+    let full = {
+        let state = state();
+        state
+            .explored_full
+            .map_or(true, |at| at.elapsed().as_secs() >= 2)
+    };
     let started = std::time::Instant::now();
     let half = (logic::MINI / 2) as i32;
     let mut loaded = 0usize;
@@ -1105,6 +1119,9 @@ pub(super) fn explore(game: &mut crate::game::Game<'_>) {
         for dz in -half..half {
             for dx in -half..half {
                 let (x, z) = (center.0 + dx, center.1 + dz);
+                if !full && seen(&state, x, z) != 0 {
+                    continue;
+                }
                 if !world.loaded(x, z) {
                     continue;
                 }
@@ -1113,7 +1130,18 @@ pub(super) fn explore(game: &mut crate::game::Game<'_>) {
                 let block = world.block(x, surface - 1, z);
                 let entry = facts.states.get(block.0 as usize);
                 let colour = entry.map_or(0, |state| state.map_color);
-                remember(&mut state, x, z, map_pixel(colour, surface));
+                // Shade once, here, and store the finished colour: doing it per
+                // frame for every cell is what costs frames.
+                let north = seen(&state, x, z - 1);
+                let west = seen(&state, x - 1, z);
+                let shaded = logic::relief(
+                    logic::cell_rgb(map_pixel(colour, surface)),
+                    surface,
+                    (north != 0).then(|| logic::cell_height(north)),
+                    (west != 0).then(|| logic::cell_height(west)),
+                    logic::jitter(x, z),
+                );
+                remember(&mut state, x, z, logic::pack_cell(shaded, surface));
                 if dx == 0 && dz == 0 {
                     debug = format!(
                         "centre {x},{z} y{}: {} colour {colour} surface {surface}",
@@ -1135,6 +1163,9 @@ pub(super) fn explore(game: &mut crate::game::Game<'_>) {
         let tiles: usize = state.tiles.len();
         state.mini_every = every;
         state.explored_at = Some((center, std::time::Instant::now()));
+        if full {
+            state.explored_full = Some(std::time::Instant::now());
+        }
         state.map_debug = format!(
             "{loaded}/{} loaded · {tiles} tiles seen · {every} ms · {micros} µs · {debug}",
             (logic::MINI * logic::MINI) as usize
@@ -1149,8 +1180,8 @@ pub(super) fn explore(game: &mut crate::game::Game<'_>) {
 }
 
 /// The map's cells from what has been seen: `cols` by `rows` around `centre`,
-/// one cell every `zoom` blocks, `offset` in pixels for the part of a block
-/// the player stands past the last whole one, cut to a disc when `round`.
+/// one cell every `zoom` blocks, `offset` in pixels for the part of a block the
+/// player stands past the last whole one, cut to a disc when `round`.
 fn draw_cells(
     host: &dyn crate::mod_api::Host,
     batch: &mut crate::hud::HudBatch,
@@ -1172,35 +1203,41 @@ fn draw_cells(
     for row in 0..rows {
         let top = y + row as f32 * cell_height + offset[1];
         let z = centre.1 + (row as i32 - half_row) * step;
-        for column in 0..cols {
+        let mut column = 0u32;
+        while column < cols {
             if round && !logic::in_circle(column, row, cols) {
+                column += 1;
                 continue;
             }
-            let (dx, dz) = (
-                centre.0 + (column as i32 - half_column) * step,
-                z,
-            );
-            let packed = seen(state, dx, dz);
-            if packed == 0 {
+            let colour = logic::cell_rgb(seen(state, centre.0 + (column as i32 - half_column) * step, z));
+            if colour == 0 {
+                column += 1;
                 continue;
             }
-            // Shaded by the slope to the north and west, as a relief map is:
-            // that is what makes it read as land instead of flat squares.
-            let north = seen(state, dx, dz - step);
-            let west = seen(state, dx - step, dz);
-            let colour = logic::relief(
-                logic::cell_rgb(packed),
-                logic::cell_height(packed),
-                (north != 0).then(|| logic::cell_height(north)),
-                (west != 0).then(|| logic::cell_height(west)),
-                logic::jitter(dx, dz),
-            );
-            let left = x + column as f32 * cell_width + offset[0];
+            // Run-length: neighbours of one colour become a single rect, so a
+            // field of grass costs one quad a row instead of ninety-six.
+            let mut run = 1u32;
+            while column + run < cols {
+                if round && !logic::in_circle(column + run, row, cols) {
+                    break;
+                }
+                let next = centre.0 + ((column + run) as i32 - half_column) * step;
+                if logic::cell_rgb(seen(state, next, z)) != colour {
+                    break;
+                }
+                run += 1;
+            }
             host.fill(
                 batch,
-                [left, top, cell_width + 0.5, cell_height + 0.5],
+                [
+                    x + column as f32 * cell_width + offset[0],
+                    top,
+                    cell_width * run as f32 + 0.5,
+                    cell_height + 0.5,
+                ],
                 colour,
             );
+            column += run;
         }
     }
 }
@@ -1256,7 +1293,7 @@ pub(super) fn hud_post(
     if !(layer == "minecraft:hotbar" || layer == "hotbar") || !game.native_playing() {
         return;
     }
-    let state = state();
+    let mut state = state();
     if state.tiles.is_empty() {
         return;
     }
@@ -1295,6 +1332,14 @@ pub(super) fn hud_post(
             ]
         })
         .unwrap_or([0.0, 0.0]);
+    // Draw it, and if that was dear, draw it half as fine from now on: frames
+    // matter more than the last pixel of detail.
+    let started = std::time::Instant::now();
+    let cells = if state.mini_coarse {
+        logic::MINI / 2
+    } else {
+        logic::MINI
+    };
     draw_cells(
         host,
         batch,
@@ -1302,11 +1347,12 @@ pub(super) fn hud_post(
         &state,
         centre,
         offset,
-        zoom,
-        logic::MINI,
-        logic::MINI,
+        zoom * logic::MINI / cells,
+        cells,
+        cells,
         true,
     );
+    state.mini_coarse = started.elapsed().as_micros() > 2_500 && cells == logic::MINI;
     // The frame: dark outside, light inside, as the minimap's ring.
     for square in logic::ring(side + 4.0, 3.0, 96) {
         host.fill(
