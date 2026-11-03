@@ -28,7 +28,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.18.0";
+pub const VERSION: &str = "0.19.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -982,7 +982,10 @@ fn sample(
     step: i32,
     cols: u32,
     rows: u32,
-) -> (Vec<u32>, usize, String) {
+) -> (Vec<u32>, (i32, i32), usize, String) {
+    // The grid sits on the world lattice, so a rebuild lands on the same cell
+    // edges and the picture slides instead of shimmering.
+    let anchor = (logic::aligned(center.0, step), logic::aligned(center.1, step));
     let half_column = (cols / 2) as i32;
     let half_row = (rows / 2) as i32;
     let mut grid = vec![MAP_UNKNOWN_FILL; (cols * rows) as usize];
@@ -993,8 +996,8 @@ fn sample(
     let is_air = |block| facts.is_air(block);
     for row in 0..rows {
         for column in 0..cols {
-            let x = center.0 + (column as i32 - half_column) * step;
-            let z = center.1 + (row as i32 - half_row) * step;
+            let x = anchor.0 + (column as i32 - half_column) * step;
+            let z = anchor.1 + (row as i32 - half_row) * step;
             if !world.loaded(x, z) {
                 continue;
             }
@@ -1013,7 +1016,7 @@ fn sample(
             grid[(row * cols + column) as usize] = map_pixel(colour, surface);
         }
     }
-    (grid, loaded, debug)
+    (grid, anchor, loaded, debug)
 }
 
 /// The world map's cells: 16 by 9, as the window usually is.
@@ -1052,13 +1055,17 @@ pub(super) fn refresh_minimap(game: &mut crate::game::Game<'_>) {
         let state = state();
         let every = state.mini_every;
         if let (Some((built, built_step)), Some(at)) = (state.mini_center, state.mini_at) {
-            if (built == center && built_step == step) || at.elapsed().as_millis() < every {
+            let reach = step.max(1) as i32;
+            let near = (built.0 - center.0).abs() < reach && (built.1 - center.1).abs() < reach;
+            // In between, the picture slides by the anchor's own offset; it is
+            // only rebuilt when the player leaves the lattice cell they are on.
+            if (near && built_step == step) || at.elapsed().as_millis() < every {
                 return;
             }
         }
     }
     let started = std::time::Instant::now();
-    let (grid, loaded, debug) = sample(game, center, step as i32, logic::MINI, logic::MINI);
+    let (grid, anchor, loaded, debug) = sample(game, center, step as i32, logic::MINI, logic::MINI);
     // 24 times a second while a resample is cheap, less when it is not.
     let micros = started.elapsed().as_micros();
     let every = if micros > 6_000 {
@@ -1071,7 +1078,7 @@ pub(super) fn refresh_minimap(game: &mut crate::game::Game<'_>) {
     let total = (logic::MINI * logic::MINI) as usize;
     let mut state = state();
     state.mini_grid = grid;
-    state.mini_center = Some((center, step));
+    state.mini_center = Some((anchor, step));
     state.mini_at = Some(std::time::Instant::now());
     state.mini_every = every;
     state.map_debug = format!(
@@ -1104,8 +1111,8 @@ pub(super) fn refresh_big(game: &mut crate::game::Game<'_>) {
             (Some((built, built_zoom)), Some(at)) => {
                 *built_zoom != zoom
                     || at.elapsed().as_millis() > 800
-                    || (built.0 - center.0).abs() >= 8
-                    || (built.1 - center.1).abs() >= 8
+                    || (built.0 - center.0).abs() >= 2 * zoom as i32
+                    || (built.1 - center.1).abs() >= 2 * zoom as i32
             }
             _ => true,
         };
@@ -1114,11 +1121,11 @@ pub(super) fn refresh_big(game: &mut crate::game::Game<'_>) {
         }
     }
     let (cols, rows) = big_cells();
-    let (grid, loaded, debug) = sample(game, center, zoom as i32, cols, rows);
+    let (grid, anchor, loaded, debug) = sample(game, center, zoom as i32, cols, rows);
     let total = (cols * rows) as usize;
     let mut state = state();
     state.big_grid = grid;
-    state.big_built = Some((center, zoom));
+    state.big_built = Some((anchor, zoom));
     state.big_at = Some(std::time::Instant::now());
     state.map_debug = format!("world map {loaded}/{total} · {debug}");
 }

@@ -329,6 +329,14 @@ pub fn window_of(offset: usize, total: usize, visible: usize) -> (usize, usize) 
     (first, total.saturating_sub(first).min(visible))
 }
 
+/// The world lattice a map samples on: cells sit on multiples of `step`, so a
+/// grid rebuilt around a new centre covers exactly the same cell boundaries and
+/// the picture slides instead of shimmering.
+pub fn aligned(center: i32, step: i32) -> i32 {
+    let step = step.max(1);
+    center.div_euclid(step) * step
+}
+
 /// Whether the cell at `column`,`row` of a `cells` square grid lies inside the
 /// inscribed circle: the minimap is round, as Xaero's is.
 pub fn in_circle(column: u32, row: u32, cells: u32) -> bool {
@@ -642,6 +650,14 @@ mod tests {
         // Only the rows it was told about.
         let [_, below, _, _] = row(p, 4);
         assert_eq!(hit(p, 4, [x + 1.0, below + 1.0]), None);
+    }
+
+    #[test]
+    fn cells_sit_on_the_world_lattice() {
+        assert_eq!(aligned(21, 8), 16);
+        assert_eq!(aligned(-3, 8), -8);
+        assert_eq!(aligned(7, 1), 7);
+        assert_eq!(aligned(0, 0), 0);
     }
 
     #[test]

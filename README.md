@@ -67,8 +67,10 @@ mod is loaded).
 - compass letters `N` `E` `S` `W` around the ring
 - the player's arrow turned to the view (`logic::arrow`, a rasterised triangle with a shadow)
 - the coordinates on a dark plate under the disc
-- live: resampled as you walk, ten times a second at most, and the picture slides by the sub-cell
-  offset instead of jumping
+- projected, not re-centred: the grid's cells sit on a fixed world lattice (`logic::aligned`), so a
+  rebuild covers exactly the same cell edges and the picture slides by the anchor's own offset while
+  you walk — no shimmer, no jump. It is only resampled when you leave the cell you were on, and at
+  most 24 times a second (`mini_every`, which steps down to 18 or 12 while a pass takes longer)
 - keys: `[` and `]` zoom (1 to 8 blocks per cell), `C` moves it to the next corner
 
 **World map** (`M`) — full window, as Xaero's World Map:
