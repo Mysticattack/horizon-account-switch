@@ -28,7 +28,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.16.0";
+pub const VERSION: &str = "0.17.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -43,6 +43,16 @@ pub const ZOOM_DEFAULT: &str = "key.keyboard.c";
 /// The map key: it opens the minimap into the big map and back.
 pub const MAP_KEY: &str = "map";
 pub const MAP_DEFAULT: &str = "key.keyboard.m";
+
+/// The minimap's zoom keys: blocks per cell, as the Minimap has it.
+pub const MINI_OUT_KEY: &str = "minimap_zoom_out";
+pub const MINI_OUT_DEFAULT: &str = "key.keyboard.bracketleft";
+pub const MINI_IN_KEY: &str = "minimap_zoom_in";
+pub const MINI_IN_DEFAULT: &str = "key.keyboard.bracketright";
+
+/// The waypoint key: a marker where the player stands, as the World Map has it.
+pub const WAYPOINT_KEY: &str = "waypoint";
+pub const WAYPOINT_DEFAULT: &str = "key.keyboard.b";
 /// The screen's title.
 const TITLE: &str = "Account Switch";
 /// Frames to let the title come back before joining again.
@@ -113,10 +123,16 @@ struct State {
     /// sampling, not an enlargement of the minimap.
     big_grid: Vec<u32>,
     /// The minimap's colours, row by row (`logic::MINI` squared), and the
-    /// centre they were sampled around: a small live grid, rebuilt as you walk.
+    /// centre and zoom they were sampled at: a small live grid.
     mini_grid: Vec<u32>,
-    mini_center: Option<(i32, i32)>,
+    mini_center: Option<((i32, i32), u32)>,
     mini_at: Option<std::time::Instant>,
+    /// The minimap's zoom: blocks per cell.
+    mini_zoom: u32,
+    /// How far the world map is dragged from the player, in blocks.
+    pan: (i32, i32),
+    /// The waypoints the world map shows.
+    waypoints: Vec<(i32, i32)>,
     /// The build said what it found, once.
     map_said: bool,
     /// What the last build found, for the map screen's own line.
@@ -150,6 +166,9 @@ static STATE: Mutex<State> = Mutex::new(State {
     mini_grid: Vec::new(),
     mini_center: None,
     mini_at: None,
+    mini_zoom: 1,
+    pan: (0, 0),
+    waypoints: Vec::new(),
     map_said: false,
     map_debug: String::new(),
     corner: 1,
@@ -957,19 +976,21 @@ fn sample(
     game: &crate::game::Game<'_>,
     center: (i32, i32),
     step: i32,
-    cells: u32,
+    cols: u32,
+    rows: u32,
 ) -> (Vec<u32>, usize, String) {
-    let half = (cells / 2) as i32;
-    let mut grid = vec![MAP_UNKNOWN_FILL; (cells * cells) as usize];
+    let half_column = (cols / 2) as i32;
+    let half_row = (rows / 2) as i32;
+    let mut grid = vec![MAP_UNKNOWN_FILL; (cols * rows) as usize];
     let mut loaded = 0usize;
     let mut debug = String::from("centre: not loaded");
     let world = &game.world;
     let facts = game.res.facts();
     let is_air = |block| facts.is_air(block);
-    for row in 0..cells {
-        for column in 0..cells {
-            let x = center.0 + (column as i32 - half) * step;
-            let z = center.1 + (row as i32 - half) * step;
+    for row in 0..rows {
+        for column in 0..cols {
+            let x = center.0 + (column as i32 - half_column) * step;
+            let z = center.1 + (row as i32 - half_row) * step;
             if !world.loaded(x, z) {
                 continue;
             }
@@ -978,17 +999,36 @@ fn sample(
             let block = world.block(x, surface - 1, z);
             let entry = facts.states.get(block.0 as usize);
             let colour = entry.map_or(255, |state| state.map_color);
-            if column == half as u32 && row == half as u32 {
+            if column == half_column as u32 && row == half_row as u32 {
                 debug = format!(
                     "centre {x},{z} y{}: {} colour {colour} surface {surface}",
                     surface - 1,
                     entry.map_or("?", |state| &state.name)
                 );
             }
-            grid[(row * cells + column) as usize] = map_pixel(colour, surface);
+            grid[(row * cols + column) as usize] = map_pixel(colour, surface);
         }
     }
     (grid, loaded, debug)
+}
+
+/// The world map's cells: 16 by 9, as the window usually is.
+fn big_cells() -> (u32, u32) {
+    (logic::BIG, logic::BIG * 9 / 16)
+}
+
+/// Where the world map sits in `window`: 16 by 9, centred, under the top bar
+/// and above the bottom one, so its cells stay square.
+fn map_area(window: [f32; 2]) -> [f32; 4] {
+    let room = (window[1] - 34.0).max(32.0);
+    let width = (room * 16.0 / 9.0).min(window[0]);
+    let height = (width * 9.0 / 16.0).min(room);
+    [
+        (window[0] - width) / 2.0,
+        16.0 + (room - height) / 2.0,
+        width,
+        height,
+    ]
 }
 
 /// The player's column, to the block.
@@ -997,57 +1037,55 @@ fn player_center(game: &crate::game::Game<'_>) -> Option<(i32, i32)> {
     Some((position.x.floor() as i32, position.z.floor() as i32))
 }
 
-/// Rebuilds the minimap as the player walks: one block per cell, live, at most
-/// eight times a second and only when the centre moved a block.
+/// Rebuilds the minimap as the player walks: one cell every `mini_zoom`
+/// blocks, live, at most ten times a second.
 pub(super) fn refresh_minimap(game: &mut crate::game::Game<'_>) {
     let Some(center) = player_center(game) else {
         return;
     };
+    let step = state().mini_zoom.max(1);
     {
         let state = state();
-        if let (Some(built), Some(at)) = (state.mini_center, state.mini_at) {
-            let calm = built.0 == center.0 && built.1 == center.1;
-            if calm || at.elapsed().as_millis() < 120 {
+        if let (Some((built, built_step)), Some(at)) = (state.mini_center, state.mini_at) {
+            if (built == center && built_step == step) || at.elapsed().as_millis() < 100 {
                 return;
             }
         }
     }
-    let (grid, loaded, debug) = sample(game, center, 1, logic::MINI);
+    let (grid, loaded, debug) = sample(game, center, step as i32, logic::MINI, logic::MINI);
     let total = (logic::MINI * logic::MINI) as usize;
     let mut state = state();
     state.mini_grid = grid;
-    state.mini_center = Some(center);
+    state.mini_center = Some((center, step));
     state.mini_at = Some(std::time::Instant::now());
-    state.map_debug = format!(
-        "minimap {loaded}/{total} loaded · chunks {} · {debug}",
-        game.world.chunks.len()
-    );
+    state.map_debug = format!("minimap {loaded}/{total} loaded · chunks {} · {debug}", game.world.chunks.len());
     let first = !state.map_said;
     state.map_said = true;
     drop(state);
     if first {
-        // Once, so a map that stays dark says why.
-        tell(format!(
-            "Account Switch map: {loaded} of {total} columns loaded"
-        ));
+        tell(format!("Account Switch map: {loaded} of {total} columns loaded"));
     }
 }
 
-/// Rebuilds the world map while it is open: its own, finer sampling (four
-/// times the minimap's cells), so it is not the minimap drawn larger.
+/// Rebuilds the world map while it is open: its own, finer grid around the
+/// player plus the dragged offset, so it is not the minimap drawn larger.
 pub(super) fn refresh_big(game: &mut crate::game::Game<'_>) {
-    let Some(center) = player_center(game) else {
+    let Some(player) = player_center(game) else {
         return;
     };
-    let zoom = state().map_zoom.max(1);
+    let (zoom, pan) = {
+        let state = state();
+        (state.map_zoom.max(1), state.pan)
+    };
+    let center = (player.0 + pan.0, player.1 + pan.1);
     {
         let state = state();
         let stale = match (&state.big_built, state.big_at) {
             (Some((built, built_zoom)), Some(at)) => {
                 *built_zoom != zoom
-                    || at.elapsed().as_millis() > 1200
-                    || (built.0 - center.0).abs() >= 4 * zoom as i32
-                    || (built.1 - center.1).abs() >= 4 * zoom as i32
+                    || at.elapsed().as_millis() > 800
+                    || (built.0 - center.0).abs() >= 8
+                    || (built.1 - center.1).abs() >= 8
             }
             _ => true,
         };
@@ -1055,8 +1093,9 @@ pub(super) fn refresh_big(game: &mut crate::game::Game<'_>) {
             return;
         }
     }
-    let (grid, loaded, debug) = sample(game, center, zoom as i32, logic::BIG);
-    let total = (logic::BIG * logic::BIG) as usize;
+    let (cols, rows) = big_cells();
+    let (grid, loaded, debug) = sample(game, center, zoom as i32, cols, rows);
+    let total = (cols * rows) as usize;
     let mut state = state();
     state.big_grid = grid;
     state.big_built = Some((center, zoom));
@@ -1064,48 +1103,85 @@ pub(super) fn refresh_big(game: &mut crate::game::Game<'_>) {
     state.map_debug = format!("world map {loaded}/{total} · {debug}");
 }
 
-/// One filled cell per texel of `grid` (`texels` squared), inside `area`: the
-/// bundle draws the map itself, because a mixin bundle never gets the mod
-/// image slot `native_mod_image` writes.
+/// The map's cells as filled rectangles, `offset` in pixels to shift a grid
+/// that was sampled around another centre (so walking and dragging slide the
+/// picture instead of jumping), and `round` to cut it to a disc.
 fn draw_grid(
     host: &dyn crate::mod_api::Host,
     batch: &mut crate::hud::HudBatch,
     area: [f32; 4],
     grid: &[u32],
-    texels: u32,
-    first_row: u32,
-    last_row: u32,
-    first_column: u32,
-    last_column: u32,
+    cols: u32,
+    rows: u32,
+    round: bool,
+    offset: [f32; 2],
 ) {
+    if grid.is_empty() {
+        return;
+    }
     let [x, y, width, height] = area;
-    let span = (last_column - first_column).max(1) as f32;
-    let rows = (last_row - first_row).max(1) as f32;
-    for row in first_row..last_row {
-        let top = y + ((row - first_row) as f32 * height / rows).round();
-        let bottom = y + ((row - first_row + 1) as f32 * height / rows).round();
-        if bottom <= top {
-            continue;
-        }
-        for column in first_column..last_column {
-            let left = x + ((column - first_column) as f32 * width / span).round();
-            let right = x + ((column - first_column + 1) as f32 * width / span).round();
-            if right <= left {
+    let cell_width = width / cols as f32;
+    let cell_height = height / rows as f32;
+    for row in 0..rows {
+        let top = y + row as f32 * cell_height + offset[1];
+        for column in 0..cols {
+            if round && !logic::in_circle(column, row, cols) {
                 continue;
             }
-            let at = (row * texels + column) as usize;
+            let left = x + column as f32 * cell_width + offset[0];
+            let pixel = grid.get((row * cols + column) as usize).copied();
             host.fill(
                 batch,
-                [left, top, right - left, bottom - top],
-                grid.get(at).copied().unwrap_or(MAP_UNKNOWN_FILL),
+                [left, top, cell_width + 0.5, cell_height + 0.5],
+                pixel.unwrap_or(MAP_UNKNOWN_FILL),
             );
         }
     }
 }
 
-/// The minimap in its corner, over the hotbar's HUD layer
-/// (`native_gui_layer_post`, API 139): the map's middle, one cell per second
-/// texel, with a frame.
+/// The player's arrow, as Xaero's minimap has it: a triangle turned to where
+/// the player looks, with a dark shadow under it.
+fn draw_arrow(
+    host: &dyn crate::mod_api::Host,
+    batch: &mut crate::hud::HudBatch,
+    center: [f32; 2],
+    yaw: f32,
+    pixel: f32,
+) {
+    let cells = 11u32;
+    let half = cells as f32 / 2.0;
+    for (shadow, colour) in [(1.0, 0xFF_10_10_14), (0.0, 0xFF_FF_FF_FF)] {
+        for (column, row) in logic::arrow(cells, yaw) {
+            host.fill(
+                batch,
+                [
+                    center[0] + (column as f32 - half) * pixel + shadow,
+                    center[1] + (row as f32 - half) * pixel + shadow,
+                    pixel,
+                    pixel,
+                ],
+                colour,
+            );
+        }
+    }
+}
+
+/// A waypoint: a diamond with a dark edge, as the World Map draws them.
+fn draw_waypoint(
+    host: &dyn crate::mod_api::Host,
+    batch: &mut crate::hud::HudBatch,
+    at: [f32; 2],
+    size: f32,
+) {
+    host.fill(batch, [at[0] - size / 2.0 - 1.0, at[1] - 1.0, size + 2.0, 3.0], 0xFF_10_10_14);
+    host.fill(batch, [at[0] - 1.0, at[1] - size / 2.0 - 1.0, 3.0, size + 2.0], 0xFF_10_10_14);
+    host.fill(batch, [at[0] - size / 2.0, at[1] - 1.0, size, 3.0], 0xFF_40_E0_E0);
+    host.fill(batch, [at[0] - 1.0, at[1] - size / 2.0, 3.0, size], 0xFF_40_E0_E0);
+}
+
+/// The round minimap in its corner, over the hotbar's HUD layer
+/// (`native_gui_layer_post`, API 139), as Xaero's Minimap has it: disc, ring,
+/// compass letters, coordinates and the player's arrow.
 pub(super) fn hud_post(
     game: &crate::game::Game<'_>,
     layer: &str,
@@ -1119,111 +1195,201 @@ pub(super) fn hud_post(
     if state.mini_grid.is_empty() {
         return;
     }
-    let corner = state.corner;
     let host: &dyn crate::mod_api::Host = game;
     let side = logic::MINIMAP;
-    let at = logic::minimap_at([batch.width, batch.height], corner, side);
-    let cells = logic::MINI;
+    let at = logic::minimap_at([batch.width, batch.height], state.corner, side);
+    // Slide the picture by what the player walked since the last sample.
+    let offset = game
+        .player
+        .as_ref()
+        .map(|player| {
+            let (built, step) = state.mini_center.unwrap_or(((0, 0), 1));
+            let cell = side / logic::MINI as f32;
+            [
+                (built.0 as f32 - player.position.x as f32) * cell / step as f32,
+                (built.1 as f32 - player.position.z as f32) * cell / step as f32,
+            ]
+        })
+        .unwrap_or([0.0, 0.0]);
+    // A dark disc under the map, so the round edge does not show the world.
+    for square in logic::ring(side + 2.0, side / 2.0, 48) {
+        host.fill(
+            batch,
+            [at[0] - 1.0 + square[0], at[1] - 1.0 + square[1], square[2], square[3]],
+            0xE0_08_08_0C,
+        );
+    }
     draw_grid(
         host,
         batch,
         [at[0], at[1], side, side],
         &state.mini_grid,
-        cells,
-        0,
-        cells,
-        0,
-        cells,
+        logic::MINI,
+        logic::MINI,
+        true,
+        offset,
     );
-    draw_outline(host, batch, [at[0] - 2.0, at[1] - 2.0, side + 4.0, side + 4.0], 1.0, 0xFF10_10_14);
-    draw_outline(host, batch, [at[0] - 1.0, at[1] - 1.0, side + 2.0, side + 2.0], 1.0, 0xFF5A_5A_6A);
-    host.fill(
-        batch,
-        [at[0] + side / 2.0 - 1.0, at[1] + side / 2.0 - 1.0, 3.0, 3.0],
-        0xFF_FF_40_40,
-    );
+    // The frame: dark outside, light inside, as the minimap's ring.
+    for square in logic::ring(side + 4.0, 3.0, 48) {
+        host.fill(
+            batch,
+            [at[0] - 2.0 + square[0], at[1] - 2.0 + square[1], square[2], square[3]],
+            0xFF_1A_1A_20,
+        );
+    }
+    for square in logic::ring(side, 2.0, 48) {
+        host.fill(
+            batch,
+            [at[0] + square[0], at[1] + square[1], square[2], square[3]],
+            0xFF_C8_C8_D4,
+        );
+    }
+    for (letter, offset) in logic::compass(side) {
+        let width = game.native_text_width(letter);
+        host.text(
+            batch,
+            letter,
+            [at[0] + offset[0] - width / 2.0 + 2.0, at[1] + offset[1]],
+            0xFF_FF_FF_FF,
+            true,
+        );
+    }
+    if let Some(player) = game.player.as_ref() {
+        draw_arrow(
+            host,
+            batch,
+            [at[0] + side / 2.0, at[1] + side / 2.0],
+            player.yaw,
+            1.0,
+        );
+        let line = logic::coords(
+            player.position.x.floor() as i32,
+            player.position.y.floor() as i32,
+            player.position.z.floor() as i32,
+        );
+        let width = game.native_text_width(&line);
+        let left = at[0] + side / 2.0 - width / 2.0 - 3.0;
+        let top = at[1] + side + 7.0;
+        host.fill(batch, [left, top, width + 6.0, 12.0], 0xC0_08_08_0C);
+        host.text(batch, &line, [left + 3.0, top + 2.0], 0xFF_FF_FF_FF, true);
+    }
 }
 
-/// Four one-pixel lines around `rect`.
-fn draw_outline(
-    host: &dyn crate::mod_api::Host,
-    batch: &mut crate::hud::HudBatch,
-    rect: [f32; 4],
-    thickness: f32,
-    rgb: u32,
+/// Dragging on the mod's own screen pans the world map by the mouse's own
+/// movement, in blocks of the map's own zoom (`native_screen_mouse_dragged_pre`).
+pub(super) fn dragged(
+    _game: &crate::game::Game<'_>,
+    screen: &crate::mod_api::NativeScreenView<'_>,
+    button: i32,
+    delta: [f32; 2],
+    canceled: &mut bool,
 ) {
-    let [x, y, width, height] = rect;
-    host.fill(batch, [x, y, width, thickness], rgb);
-    host.fill(batch, [x, y + height - thickness, width, thickness], rgb);
-    host.fill(batch, [x, y, thickness, height], rgb);
-    host.fill(batch, [x + width - thickness, y, thickness, height], rgb);
+    if button != 0 {
+        return;
+    }
+    let window = [
+        screen.rect[0] + screen.rect[2],
+        screen.rect[1] + screen.rect[3],
+    ];
+    let mut state = state();
+    if !state.map_open {
+        return;
+    }
+    let zoom = state.map_zoom.max(1) as f32;
+    let area = map_area(window);
+    let (cols, _) = big_cells();
+    let cell = area[2] / cols as f32;
+    // Drag right: the map follows the hand, so the view moves left.
+    state.pan.0 -= (delta[0] * zoom / cell).round() as i32;
+    state.pan.1 -= (delta[1] * zoom / cell).round() as i32;
+    *canceled = true;
 }
 
-/// The world map over the world: the built image, its frame, and where the
-/// player is on it.
+/// The world map over the world, as Xaero's World Map has it: the whole window
+/// full of map, coordinates on top, waypoints, a scale line and the player.
 fn draw_map(
     game: &crate::game::Game<'_>,
     batch: &mut crate::hud::HudBatch,
     screen: &crate::mod_api::NativeScreenView<'_>,
 ) {
     let host: &dyn crate::mod_api::Host = game;
-    let window = [screen.rect[0] + screen.rect[2], screen.rect[1] + screen.rect[3]];
-    host.fill(batch, [0.0, 0.0, window[0], window[1]], VEIL);
-    let side = (window[0].min(window[1]) - 28.0).max(120.0);
-    let map = [(window[0] - side) / 2.0, (window[1] - side) / 2.0, side, side];
-    {
-        let state = state();
-        if state.big_grid.is_empty() {
-            host.fill(batch, map, MAP_UNKNOWN_FILL);
-        } else {
-            let cells = logic::BIG;
-            draw_grid(host, batch, map, &state.big_grid, cells, 0, cells, 0, cells);
+    let window = [
+        screen.rect[0] + screen.rect[2],
+        screen.rect[1] + screen.rect[3],
+    ];
+    host.fill(batch, [0.0, 0.0, window[0], window[1]], 0xFF_05_05_08);
+    let area = map_area(window);
+    let state = state();
+    let zoom = state.map_zoom.max(1);
+    let pan = state.pan;
+    let (cols, rows) = big_cells();
+    let cell = area[2] / cols as f32;
+    // Slide the grid by what changed since it was sampled.
+    let offset = match state.big_built {
+        Some((built, _)) => {
+            let player = player_center(game).unwrap_or(built);
+            [
+                (built.0 as f32 - (player.0 + pan.0) as f32) * cell / zoom as f32,
+                (built.1 as f32 - (player.1 + pan.1) as f32) * cell / zoom as f32,
+            ]
+        }
+        None => [0.0, 0.0],
+    };
+    draw_grid(host, batch, area, &state.big_grid, cols, rows, false, offset);
+    // The player sits where they are, not in the middle: the map can be dragged.
+    let player = player_center(game).unwrap_or((0, 0));
+    let me = [
+        area[0] + area[2] / 2.0 - pan.0 as f32 * cell / zoom as f32,
+        area[1] + area[3] / 2.0 - pan.1 as f32 * cell / zoom as f32,
+    ];
+    for waypoint in &state.waypoints {
+        let dx = (waypoint.0 - player.0 - pan.0) as f32 * cell / zoom as f32;
+        let dz = (waypoint.1 - player.1 - pan.1) as f32 * cell / zoom as f32;
+        let at = [area[0] + area[2] / 2.0 + dx, area[1] + area[3] / 2.0 + dz];
+        if at[0] > area[0] && at[0] < area[0] + area[2] && at[1] > area[1] && at[1] < area[1] + area[3] {
+            draw_waypoint(host, batch, at, 5.0);
         }
     }
-    draw_outline(host, batch, [map[0] - 2.0, map[1] - 2.0, map[2] + 4.0, map[3] + 4.0], 1.0, 0xFF10_10_14);
-    draw_outline(host, batch, [map[0] - 1.0, map[1] - 1.0, map[2] + 2.0, map[3] + 2.0], 1.0, 0xFF5A_5A_6A);
-    // The player, at the middle.
-    host.fill(
-        batch,
-        [
-            map[0] + map[2] / 2.0 - 2.0,
-            map[1] + map[3] / 2.0 - 2.0,
-            5.0,
-            5.0,
-        ],
-        0xFF_FF_40_40,
+    if me[0] > area[0] && me[0] < area[0] + area[2] && me[1] > area[1] && me[1] < area[1] + area[3] {
+        let yaw = game.player.as_ref().map_or(0.0, |player| player.yaw);
+        draw_arrow(host, batch, me, yaw, 1.0);
+    }
+    // Top: where the middle of the map is and how far a cell reaches.
+    let middle = (player.0 + pan.0, player.1 + pan.1);
+    let top = format!(
+        "X {}  Z {}   ·   {} blocks per cell   ·   {} waypoints",
+        middle.0,
+        middle.1,
+        zoom,
+        state.waypoints.len()
     );
-    let zoom = state().map_zoom;
-    let title = format!(
-        "Map · {} blocks across · {} per cell",
-        logic::map_blocks(zoom),
-        zoom
+    host.fill(batch, [0.0, 0.0, window[0], 15.0], 0xE0_08_08_0C);
+    host.text(batch, &top, [6.0, 4.0], 0xFF_FF_FF_FF, true);
+    // Bottom: the scale, and what the keys do.
+    let hint = format!(
+        "drag pans · wheel zooms ({zoom}) · B waypoint · C corner · M closes"
     );
-    let title_width = game.native_text_width(&title);
+    host.fill(batch, [0.0, window[1] - 17.0, window[0], 17.0], 0xE0_08_08_0C);
+    host.text(batch, &hint, [6.0, window[1] - 13.0], MUTED, true);
+    let scale_blocks = zoom * 32;
+    let scale_px = 32.0 * cell;
+    let bar_x = window[0] - scale_px - 46.0;
+    host.fill(batch, [bar_x, window[1] - 10.0, scale_px, 2.0], 0xFF_FF_FF_FF);
+    host.fill(batch, [bar_x, window[1] - 13.0, 1.0, 5.0], 0xFF_FF_FF_FF);
+    host.fill(batch, [bar_x + scale_px, window[1] - 13.0, 1.0, 5.0], 0xFF_FF_FF_FF);
     host.text(
         batch,
-        &title,
-        [map[0] + (map[2] - title_width) / 2.0, map[1] - 16.0],
-        TITLE_TEXT,
+        &format!("{scale_blocks}"),
+        [bar_x + scale_px + 3.0, window[1] - 14.0],
+        0xFF_FF_FF_FF,
         true,
     );
-    let hint = "wheel zooms · M closes";
-    let hint_width = game.native_text_width(hint);
-    host.text(
-        batch,
-        hint,
-        [map[0] + (map[2] - hint_width) / 2.0, map[1] + map[3] + 6.0],
-        MUTED,
-        true,
-    );
-    // What the last build found, so a dark map says why.
-    let debug = state().map_debug.clone();
+    let debug = state.map_debug.clone();
     if !debug.is_empty() {
-        host.text(batch, &debug, [8.0, window[1] - 22.0], CODE, true);
+        host.text(batch, &debug, [6.0, 18.0], CODE, true);
     }
 }
 
-/// The key: open (or close) the switch screen (`native_key`'s hook).
 pub(super) fn on_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
     if !game.native_window() {
         return;
@@ -1246,6 +1412,39 @@ pub(super) fn on_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool)
             game.native_mod_screen_open(ID);
         } else if game.native_mod_screen() == Some(ID) {
             game.native_mod_screen_close(ID);
+        }
+        return;
+    }
+    // The minimap's zoom: one key out, one key in.
+    if key == game.native_mod_key(ID, MINI_OUT_KEY, MINI_OUT_DEFAULT) {
+        if pressed {
+            let mut state = state();
+            state.mini_zoom = logic::zoom_out(state.mini_zoom).clamp(1, 8);
+        }
+        return;
+    }
+    if key == game.native_mod_key(ID, MINI_IN_KEY, MINI_IN_DEFAULT) {
+        if pressed {
+            let mut state = state();
+            state.mini_zoom = logic::zoom_in(state.mini_zoom).clamp(1, 8);
+        }
+        return;
+    }
+    // The waypoint key: a marker where the player stands, as the World Map has it.
+    if key == game.native_mod_key(ID, WAYPOINT_KEY, WAYPOINT_DEFAULT) {
+        if pressed && game.native_playing()
+            && let Some(center) = player_center(game)
+        {
+            let mut state = state();
+            if !state.waypoints.contains(&center) {
+                state.waypoints.push(center);
+                if state.waypoints.len() > 64 {
+                    state.waypoints.remove(0);
+                }
+            }
+            let count = state.waypoints.len();
+            drop(state);
+            tell(format!("Waypoint at {},{} ({count} set)", center.0, center.1));
         }
         return;
     }

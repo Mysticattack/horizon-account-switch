@@ -53,20 +53,32 @@ Horizon's, not a copy of them.
 **With Horizon's official Zoom mod installed, remove one of the two**: both answer `native_zoom`, and the
 first one to answer wins, so the keys would disagree about what they do.
 
-## Minimap and world map
+## Minimap and world map (Xaero-style)
 
 Both sample the surface height of the columns in reach and colour them with vanilla's map colours
-(`MAP_COLORS`). Each cell is drawn as one filled rectangle with the host's own fill call, because a
+(`MAP_COLORS`). Every cell is one filled rectangle drawn with the host's own fill call, because a
 mixin bundle never gets the image slot `native_mod_image` writes (that slot exists only while a trait
 mod is loaded).
 
-- **Minimap**: `logic::MINI` (64) cells at one block per cell, 72 GUI pixels, live — rebuilt as the
-  player walks, at most eight times a second, when the centre moved a block. Drawn in the
-  `minecraft:hotbar` HUD layer (`native_gui_layer_post`, API 139) with a two-pixel frame and the
-  player in the middle, in a corner (top right by default; `C` cycles).
-- **World map** (`M`): its own, finer grid — `logic::BIG` (160) cells, 2.5 times the minimap's detail,
-  with its own zoom 1 to 32 blocks per cell, rebuilt while it is open (every 1.2 s or after four cells
-  of movement). The line at the bottom says how many columns were loaded and what the centre block is.
+**Minimap** (`native_gui_layer_post`, layer `minecraft:hotbar`, API 139) — round, as Xaero's Minimap:
+
+- a disc of 64 cells cut to a circle (`logic::in_circle`), one block per cell, dark disc under it
+- a two-tone ring (dark outside, light inside) built from `logic::ring`'s small squares
+- compass letters `N` `E` `S` `W` around the ring
+- the player's arrow turned to the view (`logic::arrow`, a rasterised triangle with a shadow)
+- the coordinates on a dark plate under the disc
+- live: resampled as you walk, ten times a second at most, and the picture slides by the sub-cell
+  offset instead of jumping
+- keys: `[` and `]` zoom (1 to 8 blocks per cell), `C` moves it to the next corner
+
+**World map** (`M`) — full window, as Xaero's World Map:
+
+- the whole window filled with map, cells square (160 by 90), its own zoom 1 to 32 blocks per cell
+- drag with the left button pans (`native_screen_mouse_dragged_pre`, API hook), wheel zooms
+- top bar: the coordinates of the middle, blocks per cell, the number of waypoints
+- bottom bar: the key hints and a scale line with its length in blocks
+- `B` drops a waypoint where you stand; waypoints are cyan diamonds on both maps
+- resampled at most every 800 ms or after 8 blocks of movement, and the picture slides in between
 
 With Horizon's official Minimap mod there is no clash any more: that one answers `native_minimap` and draws
 the game's minimap, this one draws its own image over the HUD.

@@ -329,6 +329,74 @@ pub fn window_of(offset: usize, total: usize, visible: usize) -> (usize, usize) 
     (first, total.saturating_sub(first).min(visible))
 }
 
+/// Whether the cell at `column`,`row` of a `cells` square grid lies inside the
+/// inscribed circle: the minimap is round, as Xaero's is.
+pub fn in_circle(column: u32, row: u32, cells: u32) -> bool {
+    let half = cells as f32 / 2.0;
+    let dx = column as f32 + 0.5 - half;
+    let dy = row as f32 + 0.5 - half;
+    let radius = half - 0.5;
+    dx * dx + dy * dy <= radius * radius
+}
+
+/// The frame's ring: `segments` small squares on the circle of `diameter`,
+/// `thickness` wide, relative to the map's top left corner.
+pub fn ring(diameter: f32, thickness: f32, segments: u32) -> Vec<[f32; 4]> {
+    let centre = diameter / 2.0;
+    let radius = centre - thickness / 2.0;
+    (0..segments.max(1))
+        .map(|step| {
+            let angle = step as f32 / segments.max(1) as f32 * std::f32::consts::TAU;
+            let (sin, cos) = angle.sin_cos();
+            [
+                centre + cos * radius - thickness / 2.0,
+                centre + sin * radius - thickness / 2.0,
+                thickness,
+                thickness,
+            ]
+        })
+        .collect()
+}
+
+/// The player's arrow: a triangle pointing along the way the player faces, as
+/// the cells of a `cells` square grid that it covers. North is up, so a yaw of
+/// nought (south) points down.
+pub fn arrow(cells: u32, yaw: f32) -> Vec<(u32, u32)> {
+    let half = cells as f32 / 2.0;
+    let turn = yaw.to_radians();
+    let (dx, dy) = (-turn.sin(), turn.cos());
+    let tip = half - 1.0;
+    let mut pixels = Vec::new();
+    for row in 0..cells {
+        for column in 0..cells {
+            let x = column as f32 + 0.5 - half;
+            let y = row as f32 + 0.5 - half;
+            let along = x * dx + y * dy;
+            let across = -x * dy + y * dx;
+            if along >= -tip * 0.4 && along <= tip && across.abs() <= (tip - along) * 0.7 + 0.4 {
+                pixels.push((column, row));
+            }
+        }
+    }
+    pixels
+}
+
+/// The compass letters around the minimap: north up, then east, south, west.
+pub fn compass(diameter: f32) -> [(&'static str, [f32; 2]); 4] {
+    let edge = diameter + 4.0;
+    [
+        ("N", [diameter / 2.0 - 2.0, -8.0]),
+        ("E", [edge - 2.0, diameter / 2.0 - 4.0]),
+        ("S", [diameter / 2.0 - 2.0, edge]),
+        ("W", [-4.0, diameter / 2.0 - 4.0]),
+    ]
+}
+
+/// The coordinates line the Minimap shows under its circle.
+pub fn coords(x: i32, y: i32, z: i32) -> String {
+    format!("{x} {y} {z}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,5 +642,41 @@ mod tests {
         // Only the rows it was told about.
         let [_, below, _, _] = row(p, 4);
         assert_eq!(hit(p, 4, [x + 1.0, below + 1.0]), None);
+    }
+
+    #[test]
+    fn the_circle_leaves_the_corners_out() {
+        assert!(in_circle(32, 32, 64));
+        assert!(!in_circle(0, 0, 64));
+        assert!(!in_circle(63, 63, 64));
+        assert!(in_circle(32, 1, 64));
+    }
+
+    #[test]
+    fn the_ring_has_one_square_per_segment() {
+        let squares = ring(72.0, 3.0, 48);
+        assert_eq!(squares.len(), 48);
+        for square in &squares {
+            assert!(square[0] > -2.0 && square[0] < 72.0);
+            assert!(square[1] > -2.0 && square[1] < 72.0);
+        }
+    }
+
+    #[test]
+    fn the_arrow_points_where_the_player_faces() {
+        let south = arrow(11, 0.0);
+        assert!(!south.is_empty());
+        assert!(south.iter().any(|(_, row)| *row >= 8));
+        let north = arrow(11, 180.0);
+        assert!(north.iter().any(|(_, row)| *row <= 2));
+    }
+
+    #[test]
+    fn the_compass_is_north_east_south_west() {
+        let letters = compass(72.0);
+        assert_eq!(letters[0].0, "N");
+        assert!(letters[0].1[1] < 0.0);
+        assert_eq!(letters[2].0, "S");
+        assert_eq!(coords(12, 64, -34), "12 64 -34");
     }
 }

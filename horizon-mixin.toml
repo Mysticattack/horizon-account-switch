@@ -1,6 +1,6 @@
 [mod]
 id = "account_switch"
-version = "0.16.0"
+version = "0.17.0"
 priority = 100
 
 # The commit this bundle was written and built against. `horizon-launcher
@@ -121,6 +121,20 @@ bindings = [
   { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
   { name = "screen", ty = "&crate::mod_api::NativeScreenView<'_>", value = "&*screen" },
   { name = "button", ty = "i32", value = "button" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+# Dragging pans the world map.
+[[injection]]
+id = "screen_drag"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_mouse_dragged_pre"
+helper = "drag.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "screen", ty = "&crate::mod_api::NativeScreenView<'_>", value = "&*screen" },
+  { name = "button", ty = "i32", value = "button" },
+  { name = "delta", ty = "[f32; 2]", value = "delta" },
   { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
 ]
 
