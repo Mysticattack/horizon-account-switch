@@ -329,6 +329,48 @@ pub fn window_of(offset: usize, total: usize, visible: usize) -> (usize, usize) 
     (first, total.saturating_sub(first).min(visible))
 }
 
+/// A map colour shaded by the slope around it, so the map reads as terrain
+/// instead of flat squares: the north and west neighbours' heights tilt the
+/// light, `jitter` breaks up large fields of one colour.
+pub fn relief(rgb: u32, height: i32, north: Option<i32>, west: Option<i32>, jitter: u32) -> u32 {
+    let mut shade = 1.0f32;
+    if let Some(north) = north {
+        shade += (height - north).clamp(-1, 1) as f32 * 0.055;
+    }
+    if let Some(west) = west {
+        shade += (height - west).clamp(-1, 1) as f32 * 0.035;
+    }
+    shade += (jitter % 9) as f32 * 0.008 - 0.032;
+    let shade = shade.clamp(0.72, 1.22);
+    let channel = |shift: u32| (((rgb >> shift) & 0xFF) as f32 * shade).min(255.0) as u32;
+    0xFF00_0000 | (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
+
+/// The height a stored map cell carries, and the colour, packed into one
+/// number: height in the top byte (offset by 64), the colour below it, and
+/// nought for a block never seen.
+pub fn pack_cell(rgb: u32, height: i32) -> u32 {
+    let height = (height + 64).clamp(1, 255) as u32;
+    (height << 24) | (rgb & 0x00FF_FFFF)
+}
+
+/// The height back out of a packed cell.
+pub fn cell_height(packed: u32) -> i32 {
+    (packed >> 24) as i32 - 64
+}
+
+/// The colour back out of a packed cell.
+pub fn cell_rgb(packed: u32) -> u32 {
+    packed & 0x00FF_FFFF
+}
+
+/// A cheap hash of a block position, for the map's per-block jitter.
+pub fn jitter(x: i32, z: i32) -> u32 {
+    let mut value = (x as u32).wrapping_mul(0x9E37_79B1) ^ (z as u32).wrapping_mul(0x85EB_CA6B);
+    value ^= value >> 13;
+    value.wrapping_mul(0xC2B2_AE35) >> 7
+}
+
 /// The side of one stored map tile, in blocks. The map keeps every block it
 /// has seen, so terrain stays on it after the chunk unloads.
 pub const TILE: i32 = 16;
@@ -669,6 +711,37 @@ mod tests {
         // Only the rows it was told about.
         let [_, below, _, _] = row(p, 4);
         assert_eq!(hit(p, 4, [x + 1.0, below + 1.0]), None);
+    }
+
+    #[test]
+    fn cells_carry_height_and_colour() {
+        let packed = pack_cell(0x70A040, 63);
+        assert_eq!(cell_height(packed), 63);
+        assert_eq!(cell_rgb(packed), 0x70A040);
+        assert_eq!(pack_cell(0xFFFFFF, -64) & 0xFF00_0000, 0x0100_0000);
+    }
+
+    #[test]
+    fn relief_tilts_with_the_slope() {
+        let flat = relief(0x808080, 64, Some(64), Some(64), 0);
+        // The light comes from the north west: ground higher there faces away
+        // from it and is drawn darker.
+        let away = relief(0x808080, 64, Some(70), Some(70), 0);
+        let toward = relief(0x808080, 64, Some(58), Some(58), 0);
+        assert_ne!(flat, away);
+        assert_ne!(flat, toward);
+        assert!((toward & 0xFF) > (away & 0xFF));
+        assert_eq!(relief(0x808080, 64, Some(64), Some(64), 0) >> 24, 0xFF);
+    }
+
+    #[test]
+    fn jitter_stays_small() {
+        for x in -40..40 {
+            for z in -40..40 {
+                assert!(jitter(x, z) % 9 < 9);
+            }
+        }
+        assert_ne!(jitter(3, 4), jitter(4, 3));
     }
 
     #[test]

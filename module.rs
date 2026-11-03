@@ -29,7 +29,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.21.0";
+pub const VERSION: &str = "0.22.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -124,8 +124,13 @@ struct State {
     /// `logic::TILE` blocks: the map keeps showing terrain after its chunk
     /// unloads, as Xaero's does. `tile_order` says which tile goes first when
     /// the map is full.
-    tiles: BTreeMap<(i32, i32), Box<[u32; TILE_CELLS]>>,
+    tiles: Tiles,
     tile_order: VecDeque<(i32, i32)>,
+    /// The other worlds' maps, parked while another one is played: the nether's
+    /// map is not the overworld's, and a server's not the next server's.
+    parked: BTreeMap<String, (Tiles, VecDeque<(i32, i32)>)>,
+    /// The world the map in `tiles` belongs to.
+    active: String,
     /// Where the last exploration pass ran, and how often it may run, in
     /// milliseconds (42 is 24 times a second).
     explored_at: Option<((i32, i32), std::time::Instant)>,
@@ -164,6 +169,8 @@ static STATE: Mutex<State> = Mutex::new(State {
     mini_zoom: 1,
     tiles: BTreeMap::new(),
     tile_order: VecDeque::new(),
+    parked: BTreeMap::new(),
+    active: String::new(),
     explored_at: None,
     mini_every: 42,
     pan: (0, 0),
@@ -945,9 +952,53 @@ pub(super) fn wheel(
     *canceled = true;
 }
 
-/// What the map shows where no chunk is loaded.
-const MAP_UNKNOWN_FILL: u32 = 0xFF_18_18_1C;
 
+
+/// What one world's map holds: a colour and a height per block, in tiles.
+type Tiles = BTreeMap<(i32, i32), Box<[u32; TILE_CELLS]>>;
+
+impl State {
+    /// Switches the map to the world the player is in and parks the old one.
+    /// True when the world changed, so the caller samples at once.
+    fn activate(&mut self, key: String) -> bool {
+        if self.active == key {
+            return false;
+        }
+        let old = std::mem::replace(&mut self.active, key.clone());
+        if !old.is_empty() {
+            let tiles = std::mem::take(&mut self.tiles);
+            let order = std::mem::take(&mut self.tile_order);
+            self.parked.insert(old, (tiles, order));
+        }
+        if let Some((tiles, order)) = self.parked.remove(&key) {
+            self.tiles = tiles;
+            self.tile_order = order;
+        }
+        while self.parked.len() > 6 {
+            let Some(oldest) = self.parked.keys().next().cloned() else {
+                break;
+            };
+            self.parked.remove(&oldest);
+        }
+        self.explored_at = None;
+        true
+    }
+}
+
+/// What world the player is in: the server they joined and the dimension, the
+/// two things that make a map its own.
+fn world_key(game: &crate::game::Game<'_>) -> String {
+    let place = state()
+        .last
+        .as_ref()
+        .map_or_else(|| "Singleplayer".to_string(), |(address, _)| address.clone());
+    let dimension = match game.dim {
+        crate::game::Dim::Nether => "Nether",
+        crate::game::Dim::End => "End",
+        _ => "Overworld",
+    };
+    format!("{place} · {dimension}")
+}
 
 /// How many colours one stored tile holds.
 const TILE_CELLS: usize = (logic::TILE * logic::TILE) as usize;
@@ -985,20 +1036,18 @@ fn seen(state: &State, x: i32, z: i32) -> u32 {
     tile.get(logic::tile_slot(x, z)).copied().unwrap_or(0)
 }
 
-/// One map pixel from a block's vanilla map colour id and its height, as a
-/// packed opaque colour.
+/// One map cell from a block's vanilla map colour id and its height: the colour
+/// and the height packed together, so the map can shade it by the slope later.
 fn map_pixel(colour: u8, height: i32) -> u32 {
-    let packed = crate::blocks::MAP_COLORS
+    let rgb = crate::blocks::MAP_COLORS
         .get(colour as usize)
         .copied()
         .unwrap_or(0);
-    if colour == 0 || packed == 0 {
-        return MAP_UNKNOWN_FILL;
+    if colour == 0 || rgb == 0 {
+        // Seen, but the block has no map colour: a dark grey, not a hole.
+        return logic::pack_cell(0x18_18_1C, height);
     }
-    // A little shading by height, as vanilla's map item does.
-    let shade = (0.85 + height as f32 / 512.0).clamp(0.65, 1.15);
-    let channel = |shift: u32| (((packed >> shift) & 0xFF) as f32 * shade).min(255.0) as u32;
-    0xFF00_0000 | (channel(16) << 16) | (channel(8) << 8) | channel(0)
+    logic::pack_cell(rgb, height)
 }
 
 /// The player's column, to the block.
@@ -1034,8 +1083,11 @@ pub(super) fn explore(game: &mut crate::game::Game<'_>) {
         return;
     };
     {
+        // A new server or dimension gets its own map.
+        let key = world_key(game);
+        let changed = state().activate(key);
         let state = state();
-        if let Some((built, at)) = state.explored_at {
+        if !changed && let Some((built, at)) = state.explored_at {
             if built == center || at.elapsed().as_millis() < state.mini_every {
                 return;
             }
@@ -1124,10 +1176,25 @@ fn draw_cells(
             if round && !logic::in_circle(column, row, cols) {
                 continue;
             }
-            let colour = seen(state, centre.0 + (column as i32 - half_column) * step, z);
-            if colour == 0 {
+            let (dx, dz) = (
+                centre.0 + (column as i32 - half_column) * step,
+                z,
+            );
+            let packed = seen(state, dx, dz);
+            if packed == 0 {
                 continue;
             }
+            // Shaded by the slope to the north and west, as a relief map is:
+            // that is what makes it read as land instead of flat squares.
+            let north = seen(state, dx, dz - step);
+            let west = seen(state, dx - step, dz);
+            let colour = logic::relief(
+                logic::cell_rgb(packed),
+                logic::cell_height(packed),
+                (north != 0).then(|| logic::cell_height(north)),
+                (west != 0).then(|| logic::cell_height(west)),
+                logic::jitter(dx, dz),
+            );
             let left = x + column as f32 * cell_width + offset[0];
             host.fill(
                 batch,
@@ -1368,7 +1435,8 @@ fn draw_map(
     }
     // Top: where the middle of the map is and how far a cell reaches.
     let top = format!(
-        "X {}  Z {}   ·   {} blocks per cell   ·   {} waypoints   ·   {} tiles seen",
+        "{}   ·   X {}  Z {}   ·   {} blocks per cell   ·   {} waypoints   ·   {} tiles seen",
+        state.active,
         middle.0,
         middle.1,
         zoom,
