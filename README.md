@@ -55,33 +55,31 @@ first one to answer wins, so the keys would disagree about what they do.
 
 ## Minimap and world map (Xaero-style)
 
-Both sample the surface height of the columns in reach and colour them with vanilla's map colours
-(`MAP_COLORS`). Every cell is one filled rectangle drawn with the host's own fill call, because a
-mixin bundle never gets the image slot `native_mod_image` writes (that slot exists only while a trait
-mod is loaded).
+The map **remembers** what the player has seen. Every block in reach is sampled once — its surface
+height coloured with vanilla's map colours (`MAP_COLORS`) — and stored in tiles of `logic::TILE` blocks
+under `State::tiles` (a `BTreeMap`, oldest tiles dropped past `logic::TILE_CAP`). Both maps are drawn
+from that store, so terrain stays visible after its chunk unloads, and the picture glides by the block
+fraction instead of being rebuilt. Each cell is one filled rectangle through the host's fill call,
+because a mixin bundle never gets the image slot `native_mod_image` writes.
 
 **Minimap** (`native_gui_layer_post`, layer `minecraft:hotbar`, API 139) — round, as Xaero's Minimap:
 
-- a disc of 96 cells cut to a circle (`logic::in_circle`), one pixel per cell (96 blocks across), a
-dark disc under it — and nothing at all where a chunk is not loaded
-- a two-tone ring (dark outside, light inside) built from `logic::ring`'s small squares
-- compass letters `N` `E` `S` `W` around the ring
-- the player's arrow turned to the view (`logic::arrow`, a rasterised triangle with a shadow)
+- a disc of 96 cells cut to a circle (`logic::in_circle`), one pixel per cell, dark disc under it
+- a two-tone ring (`logic::ring`) and compass letters `N` `E` `S` `W`
+- the player's arrow turned to the view (`logic::arrow`)
 - the coordinates on a dark plate under the disc
-- projected, not re-centred: the grid's cells sit on a fixed world lattice (`logic::aligned`), so a
-  rebuild covers exactly the same cell edges and the picture slides by the anchor's own offset while
-  you walk — no shimmer, no jump. It is only resampled when you leave the cell you were on, and at
-  most 24 times a second (`mini_every`, which steps down to 18 or 12 while a pass takes longer)
-- keys: `[` and `]` zoom (1 to 8 blocks per cell), `C` moves it to the next corner
+- `[` and `]` zoom (1 to 8 blocks per cell), `C` moves it to the next corner
 
 **World map** (`M`) — full window, as Xaero's World Map:
 
-- the whole window filled with map, cells square (160 by 90), its own zoom 1 to 32 blocks per cell
-- drag with the left button pans (`native_screen_mouse_dragged_pre`, API hook), wheel zooms
-- top bar: the coordinates of the middle, blocks per cell, the number of waypoints
-- bottom bar: the key hints and a scale line with its length in blocks
-- `B` drops a waypoint where you stand; waypoints are cyan diamonds on both maps
-- resampled at most every 800 ms or after 8 blocks of movement, and the picture slides in between
+- the whole window filled with everything seen so far, square cells (160 by 90), zoom 1 to 32
+- drag with the left button pans (`native_screen_mouse_dragged_pre`), wheel zooms
+- top bar: the coordinates of the middle, blocks per cell, waypoints, tiles seen
+- bottom bar: key hints and a scale line with its length in blocks
+- `B` drops a waypoint where you stand
+
+Blocks never seen are not drawn at all: the background shows through, instead of dark tiles for
+unloaded chunks.
 
 With Horizon's official Minimap mod there is no clash any more: that one answers `native_minimap` and draws
 the game's minimap, this one draws its own image over the HUD.

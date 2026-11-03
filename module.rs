@@ -16,6 +16,7 @@
 // prints, the next account, the screen's geometry) is the mod's own crate,
 // `horizon-account-switch-core`, with its tests.
 use std::{
+    collections::{BTreeMap, VecDeque},
     io::{BufRead, BufReader},
     path::PathBuf,
     process::{Command, Stdio},
@@ -28,7 +29,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.20.0";
+pub const VERSION: &str = "0.21.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -115,22 +116,19 @@ struct State {
     zoom: Option<f32>,
     /// The map key was pressed: the screen shows the world map.
     map_open: bool,
-    /// Blocks per world map cell, and when the world map was built.
+    /// Blocks per world map cell.
     map_zoom: u32,
-    big_built: Option<((i32, i32), u32)>,
-    big_at: Option<std::time::Instant>,
-    /// The world map's colours, row by row (`logic::BIG` squared): its own
-    /// sampling, not an enlargement of the minimap.
-    big_grid: Vec<u32>,
-    /// The minimap's colours, row by row (`logic::MINI` squared), and the
-    /// centre and zoom they were sampled at: a small live grid.
-    mini_grid: Vec<u32>,
-    mini_center: Option<((i32, i32), u32)>,
-    mini_at: Option<std::time::Instant>,
     /// The minimap's zoom: blocks per cell.
     mini_zoom: u32,
-    /// How often the minimap may resample, in milliseconds: 42 is 24 times a
-    /// second, and it steps down by itself while a resample takes long.
+    /// Every block the player has seen, one colour each, in tiles of
+    /// `logic::TILE` blocks: the map keeps showing terrain after its chunk
+    /// unloads, as Xaero's does. `tile_order` says which tile goes first when
+    /// the map is full.
+    tiles: BTreeMap<(i32, i32), Box<[u32; TILE_CELLS]>>,
+    tile_order: VecDeque<(i32, i32)>,
+    /// Where the last exploration pass ran, and how often it may run, in
+    /// milliseconds (42 is 24 times a second).
+    explored_at: Option<((i32, i32), std::time::Instant)>,
     mini_every: u128,
     /// How far the world map is dragged from the player, in blocks.
     pan: (i32, i32),
@@ -163,13 +161,10 @@ static STATE: Mutex<State> = Mutex::new(State {
     zoom: None,
     map_open: false,
     map_zoom: 1,
-    big_built: None,
-    big_at: None,
-    big_grid: Vec::new(),
-    mini_grid: Vec::new(),
-    mini_center: None,
-    mini_at: None,
     mini_zoom: 1,
+    tiles: BTreeMap::new(),
+    tile_order: VecDeque::new(),
+    explored_at: None,
     mini_every: 42,
     pan: (0, 0),
     waypoints: Vec::new(),
@@ -441,11 +436,7 @@ pub(super) fn pump(game: &mut crate::game::Game<'_>) {
         }
     }
     if game.native_playing() {
-        refresh_minimap(game);
-    }
-    let map_open = state().map_open;
-    if map_open {
-        refresh_big(game);
+        explore(game);
     }
     let first = {
         let mut state = state();
@@ -957,6 +948,43 @@ pub(super) fn wheel(
 /// What the map shows where no chunk is loaded.
 const MAP_UNKNOWN_FILL: u32 = 0xFF_18_18_1C;
 
+
+/// How many colours one stored tile holds.
+const TILE_CELLS: usize = (logic::TILE * logic::TILE) as usize;
+
+/// Remembers one block's surface colour, keeping the map inside its cap by
+/// dropping the tiles looked at longest ago.
+fn remember(state: &mut State, x: i32, z: i32, colour: u32) {
+    if colour == 0 {
+        return;
+    }
+    let key = logic::tile_key(x, z);
+    if !state.tiles.contains_key(&key) {
+        state.tiles.insert(key, Box::new([0u32; TILE_CELLS]));
+        state.tile_order.push_back(key);
+        while state.tile_order.len() > logic::TILE_CAP {
+            if let Some(oldest) = state.tile_order.pop_front() {
+                state.tiles.remove(&oldest);
+            }
+        }
+    }
+    if let Some(tile) = state.tiles.get_mut(&key) {
+        let slot = logic::tile_slot(x, z);
+        if let Some(cell) = tile.get_mut(slot) {
+            *cell = colour;
+        }
+    }
+}
+
+/// What the map already knows about a block: nought when it has never been
+/// seen, so nothing is drawn there.
+fn seen(state: &State, x: i32, z: i32) -> u32 {
+    let Some(tile) = state.tiles.get(&logic::tile_key(x, z)) else {
+        return 0;
+    };
+    tile.get(logic::tile_slot(x, z)).copied().unwrap_or(0)
+}
+
 /// One map pixel from a block's vanilla map colour id and its height, as a
 /// packed opaque colour.
 fn map_pixel(colour: u8, height: i32) -> u32 {
@@ -973,52 +1001,10 @@ fn map_pixel(colour: u8, height: i32) -> u32 {
     0xFF00_0000 | (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
-/// The surface colours of `cells` by `cells` columns around `center`, one cell
-/// every `step` blocks: packed opaque colours, how many columns were loaded,
-/// and what the centre column holds.
-fn sample(
-    game: &crate::game::Game<'_>,
-    center: (i32, i32),
-    step: i32,
-    cols: u32,
-    rows: u32,
-) -> (Vec<u32>, (i32, i32), usize, String) {
-    // The grid sits on the world lattice, so a rebuild lands on the same cell
-    // edges and the picture slides instead of shimmering.
-    let anchor = (logic::aligned(center.0, step), logic::aligned(center.1, step));
-    let half_column = (cols / 2) as i32;
-    let half_row = (rows / 2) as i32;
-    // A cell stays zero where no chunk is loaded: nothing is drawn for it, so
-    // the world map shows its own dark background there, as Xaero's does.
-    let mut grid = vec![0u32; (cols * rows) as usize];
-    let mut loaded = 0usize;
-    let mut debug = String::from("centre: not loaded");
-    let world = &game.world;
-    let facts = game.res.facts();
-    let is_air = |block| facts.is_air(block);
-    for row in 0..rows {
-        for column in 0..cols {
-            let x = anchor.0 + (column as i32 - half_column) * step;
-            let z = anchor.1 + (row as i32 - half_row) * step;
-            if !world.loaded(x, z) {
-                continue;
-            }
-            loaded += 1;
-            let surface = world.world_surface(x, z, is_air);
-            let block = world.block(x, surface - 1, z);
-            let entry = facts.states.get(block.0 as usize);
-            let colour = entry.map_or(255, |state| state.map_color);
-            if column == half_column as u32 && row == half_row as u32 {
-                debug = format!(
-                    "centre {x},{z} y{}: {} colour {colour} surface {surface}",
-                    surface - 1,
-                    entry.map_or("?", |state| &state.name)
-                );
-            }
-            grid[(row * cols + column) as usize] = map_pixel(colour, surface);
-        }
-    }
-    (grid, anchor, loaded, debug)
+/// The player's column, to the block.
+fn player_center(game: &crate::game::Game<'_>) -> Option<(i32, i32)> {
+    let position = game.player.as_ref()?.position;
+    Some((position.x.floor() as i32, position.z.floor() as i32))
 }
 
 /// The world map's cells: 16 by 9, as the window usually is.
@@ -1040,132 +1026,113 @@ fn map_area(window: [f32; 2]) -> [f32; 4] {
     ]
 }
 
-/// The player's column, to the block.
-fn player_center(game: &crate::game::Game<'_>) -> Option<(i32, i32)> {
-    let position = game.player.as_ref()?.position;
-    Some((position.x.floor() as i32, position.z.floor() as i32))
-}
-
-/// Rebuilds the minimap as the player walks: one cell every `mini_zoom`
-/// blocks, live, at most ten times a second.
-pub(super) fn refresh_minimap(game: &mut crate::game::Game<'_>) {
+/// Looks at every block in reach and stores its surface colour in the map, so
+/// the terrain stays on the map after its chunk unloads. Runs at most every
+/// `mini_every` milliseconds, and only after the player moved a block.
+pub(super) fn explore(game: &mut crate::game::Game<'_>) {
     let Some(center) = player_center(game) else {
         return;
     };
-    let step = state().mini_zoom.max(1);
     {
         let state = state();
-        let every = state.mini_every;
-        if let (Some((built, built_step)), Some(at)) = (state.mini_center, state.mini_at) {
-            let reach = step.max(1) as i32;
-            let near = (built.0 - center.0).abs() < reach && (built.1 - center.1).abs() < reach;
-            // In between, the picture slides by the anchor's own offset; it is
-            // only rebuilt when the player leaves the lattice cell they are on.
-            if (near && built_step == step) || at.elapsed().as_millis() < every {
+        if let Some((built, at)) = state.explored_at {
+            if built == center || at.elapsed().as_millis() < state.mini_every {
                 return;
             }
         }
     }
     let started = std::time::Instant::now();
-    let (grid, anchor, loaded, debug) = sample(game, center, step as i32, logic::MINI, logic::MINI);
-    // 24 times a second while a resample is cheap, less when it is not.
-    let micros = started.elapsed().as_micros();
-    let every = if micros > 6_000 {
-        83
-    } else if micros > 3_000 {
-        55
-    } else {
-        42
-    };
-    let total = (logic::MINI * logic::MINI) as usize;
-    let mut state = state();
-    state.mini_grid = grid;
-    state.mini_center = Some((anchor, step));
-    state.mini_at = Some(std::time::Instant::now());
-    state.mini_every = every;
-    state.map_debug = format!(
-        "minimap {loaded}/{total} loaded · {every} ms · {} µs · chunks {} · {debug}",
-        micros,
-        game.world.chunks.len()
-    );
-    let first = !state.map_said;
-    state.map_said = true;
-    drop(state);
-    if first {
-        tell(format!("Account Switch map: {loaded} of {total} columns loaded"));
-    }
-}
-
-/// Rebuilds the world map while it is open: its own, finer grid around the
-/// player plus the dragged offset, so it is not the minimap drawn larger.
-pub(super) fn refresh_big(game: &mut crate::game::Game<'_>) {
-    let Some(player) = player_center(game) else {
-        return;
-    };
-    let (zoom, pan) = {
-        let state = state();
-        (state.map_zoom.max(1), state.pan)
-    };
-    let center = (player.0 + pan.0, player.1 + pan.1);
+    let half = (logic::MINI / 2) as i32;
+    let mut loaded = 0usize;
+    let mut debug = String::from("centre: not loaded");
     {
-        let state = state();
-        let stale = match (&state.big_built, state.big_at) {
-            (Some((built, built_zoom)), Some(at)) => {
-                *built_zoom != zoom
-                    || at.elapsed().as_millis() > 800
-                    || (built.0 - center.0).abs() >= 2 * zoom as i32
-                    || (built.1 - center.1).abs() >= 2 * zoom as i32
+        let world = &game.world;
+        let facts = game.res.facts();
+        let is_air = |block| facts.is_air(block);
+        let mut state = state();
+        for dz in -half..half {
+            for dx in -half..half {
+                let (x, z) = (center.0 + dx, center.1 + dz);
+                if !world.loaded(x, z) {
+                    continue;
+                }
+                loaded += 1;
+                let surface = world.world_surface(x, z, is_air);
+                let block = world.block(x, surface - 1, z);
+                let entry = facts.states.get(block.0 as usize);
+                let colour = entry.map_or(0, |state| state.map_color);
+                remember(&mut state, x, z, map_pixel(colour, surface));
+                if dx == 0 && dz == 0 {
+                    debug = format!(
+                        "centre {x},{z} y{}: {} colour {colour} surface {surface}",
+                        surface - 1,
+                        entry.map_or("?", |state| &state.name)
+                    );
+                }
             }
-            _ => true,
+        }
+        // 24 passes a second while one is cheap, fewer when it is not.
+        let micros = started.elapsed().as_micros();
+        let every = if micros > 6_000 {
+            83
+        } else if micros > 3_000 {
+            55
+        } else {
+            42
         };
-        if !stale {
-            return;
+        let tiles: usize = state.tiles.len();
+        state.mini_every = every;
+        state.explored_at = Some((center, std::time::Instant::now()));
+        state.map_debug = format!(
+            "{loaded}/{} loaded · {tiles} tiles seen · {every} ms · {micros} µs · {debug}",
+            (logic::MINI * logic::MINI) as usize
+        );
+        let first = !state.map_said;
+        state.map_said = true;
+        drop(state);
+        if first {
+            tell(format!("Account Switch map: {loaded} blocks in reach seen"));
         }
     }
-    let (cols, rows) = big_cells();
-    let (grid, anchor, loaded, debug) = sample(game, center, zoom as i32, cols, rows);
-    let total = (cols * rows) as usize;
-    let mut state = state();
-    state.big_grid = grid;
-    state.big_built = Some((anchor, zoom));
-    state.big_at = Some(std::time::Instant::now());
-    state.map_debug = format!("world map {loaded}/{total} · {debug}");
 }
 
-/// The map's cells as filled rectangles, `offset` in pixels to shift a grid
-/// that was sampled around another centre (so walking and dragging slide the
-/// picture instead of jumping), and `round` to cut it to a disc.
-fn draw_grid(
+/// The map's cells from what has been seen: `cols` by `rows` around `centre`,
+/// one cell every `zoom` blocks, `offset` in pixels for the part of a block
+/// the player stands past the last whole one, cut to a disc when `round`.
+fn draw_cells(
     host: &dyn crate::mod_api::Host,
     batch: &mut crate::hud::HudBatch,
     area: [f32; 4],
-    grid: &[u32],
+    state: &State,
+    centre: (i32, i32),
+    offset: [f32; 2],
+    zoom: u32,
     cols: u32,
     rows: u32,
     round: bool,
-    offset: [f32; 2],
 ) {
-    if grid.is_empty() {
-        return;
-    }
     let [x, y, width, height] = area;
     let cell_width = width / cols as f32;
     let cell_height = height / rows as f32;
+    let half_column = (cols / 2) as i32;
+    let half_row = (rows / 2) as i32;
+    let step = zoom.max(1) as i32;
     for row in 0..rows {
         let top = y + row as f32 * cell_height + offset[1];
+        let z = centre.1 + (row as i32 - half_row) * step;
         for column in 0..cols {
             if round && !logic::in_circle(column, row, cols) {
                 continue;
             }
-            let left = x + column as f32 * cell_width + offset[0];
-            let pixel = grid.get((row * cols + column) as usize).copied().unwrap_or(0);
-            if pixel == 0 {
+            let colour = seen(state, centre.0 + (column as i32 - half_column) * step, z);
+            if colour == 0 {
                 continue;
             }
+            let left = x + column as f32 * cell_width + offset[0];
             host.fill(
                 batch,
                 [left, top, cell_width + 0.5, cell_height + 0.5],
-                pixel,
+                colour,
             );
         }
     }
@@ -1212,8 +1179,7 @@ fn draw_waypoint(
 }
 
 /// The round minimap in its corner, over the hotbar's HUD layer
-/// (`native_gui_layer_post`, API 139), as Xaero's Minimap has it: disc, ring,
-/// compass letters, coordinates and the player's arrow.
+/// (`native_gui_layer_post`, API 139), as Xaero's Minimap has it.
 pub(super) fn hud_post(
     game: &crate::game::Game<'_>,
     layer: &str,
@@ -1224,27 +1190,17 @@ pub(super) fn hud_post(
         return;
     }
     let state = state();
-    if state.mini_grid.is_empty() {
+    if state.tiles.is_empty() {
         return;
     }
+    let Some(centre) = player_center(game) else {
+        return;
+    };
     let host: &dyn crate::mod_api::Host = game;
     let side = logic::MINIMAP;
     let at = logic::minimap_at([batch.width, batch.height], state.corner, side);
-    // Slide the picture by what the player walked since the last sample.
-    let offset = game
-        .player
-        .as_ref()
-        .map(|player| {
-            let (built, step) = state.mini_center.unwrap_or(((0, 0), 1));
-            let cell = side / logic::MINI as f32;
-            [
-                (built.0 as f32 - player.position.x as f32) * cell / step as f32,
-                (built.1 as f32 - player.position.z as f32) * cell / step as f32,
-            ]
-        })
-        .unwrap_or([0.0, 0.0]);
     // A dark disc under the map, one fill per row, so the round edge does not
-    // show the world and unloaded chunks have a background.
+    // show the world and blocks never seen have a background.
     let radius = side / 2.0;
     for row in 0..side as u32 {
         let dy = row as f32 + 0.5 - radius;
@@ -1258,15 +1214,31 @@ pub(super) fn hud_post(
             0xE0_08_08_0C,
         );
     }
-    draw_grid(
+    // The part of a block the player stands past the last whole one: the map
+    // glides by it instead of stepping a whole cell.
+    let zoom = state.mini_zoom.max(1);
+    let cell = side / logic::MINI as f32;
+    let offset = game
+        .player
+        .as_ref()
+        .map(|player| {
+            [
+                -(player.position.x - centre.0 as f64) as f32 * cell / zoom as f32,
+                -(player.position.z - centre.1 as f64) as f32 * cell / zoom as f32,
+            ]
+        })
+        .unwrap_or([0.0, 0.0]);
+    draw_cells(
         host,
         batch,
         [at[0], at[1], side, side],
-        &state.mini_grid,
+        &state,
+        centre,
+        offset,
+        zoom,
         logic::MINI,
         logic::MINI,
         true,
-        offset,
     );
     // The frame: dark outside, light inside, as the minimap's ring.
     for square in logic::ring(side + 4.0, 3.0, 96) {
@@ -1283,12 +1255,12 @@ pub(super) fn hud_post(
             0xFF_C8_C8_D4,
         );
     }
-    for (letter, offset) in logic::compass(side) {
+    for (letter, position) in logic::compass(side) {
         let width = game.native_text_width(letter);
         host.text(
             batch,
             letter,
-            [at[0] + offset[0] - width / 2.0 + 2.0, at[1] + offset[1]],
+            [at[0] + position[0] - width / 2.0 + 2.0, at[1] + position[1]],
             0xFF_FF_FF_FF,
             true,
         );
@@ -1345,7 +1317,7 @@ pub(super) fn dragged(
 }
 
 /// The world map over the world, as Xaero's World Map has it: the whole window
-/// full of map, coordinates on top, waypoints, a scale line and the player.
+/// full of everything seen so far, coordinates on top, waypoints and a scale.
 fn draw_map(
     game: &crate::game::Game<'_>,
     batch: &mut crate::hud::HudBatch,
@@ -1360,30 +1332,31 @@ fn draw_map(
     let area = map_area(window);
     let state = state();
     let zoom = state.map_zoom.max(1);
-    let pan = state.pan;
     let (cols, rows) = big_cells();
     let cell = area[2] / cols as f32;
-    // Slide the grid by what changed since it was sampled.
-    let offset = match state.big_built {
-        Some((built, _)) => {
-            let player = player_center(game).unwrap_or(built);
-            [
-                (built.0 as f32 - (player.0 + pan.0) as f32) * cell / zoom as f32,
-                (built.1 as f32 - (player.1 + pan.1) as f32) * cell / zoom as f32,
-            ]
-        }
-        None => [0.0, 0.0],
-    };
-    draw_grid(host, batch, area, &state.big_grid, cols, rows, false, offset);
-    // The player sits where they are, not in the middle: the map can be dragged.
     let player = player_center(game).unwrap_or((0, 0));
+    let middle = (player.0 + state.pan.0, player.1 + state.pan.1);
+    let offset = game
+        .player
+        .as_ref()
+        .map(|me| {
+            [
+                -(me.position.x - player.0 as f64) as f32 * cell / zoom as f32,
+                -(me.position.z - player.1 as f64) as f32 * cell / zoom as f32,
+            ]
+        })
+        .unwrap_or([0.0, 0.0]);
+    draw_cells(
+        host, batch, area, &state, middle, offset, zoom, cols, rows, false,
+    );
+    // The player, where they really are on the map.
     let me = [
-        area[0] + area[2] / 2.0 - pan.0 as f32 * cell / zoom as f32,
-        area[1] + area[3] / 2.0 - pan.1 as f32 * cell / zoom as f32,
+        area[0] + area[2] / 2.0 + offset[0] - state.pan.0 as f32 * cell / zoom as f32,
+        area[1] + area[3] / 2.0 + offset[1] - state.pan.1 as f32 * cell / zoom as f32,
     ];
     for waypoint in &state.waypoints {
-        let dx = (waypoint.0 - player.0 - pan.0) as f32 * cell / zoom as f32;
-        let dz = (waypoint.1 - player.1 - pan.1) as f32 * cell / zoom as f32;
+        let dx = (waypoint.0 - middle.0) as f32 * cell / zoom as f32;
+        let dz = (waypoint.1 - middle.1) as f32 * cell / zoom as f32;
         let at = [area[0] + area[2] / 2.0 + dx, area[1] + area[3] / 2.0 + dz];
         if at[0] > area[0] && at[0] < area[0] + area[2] && at[1] > area[1] && at[1] < area[1] + area[3] {
             draw_waypoint(host, batch, at, 5.0);
@@ -1394,20 +1367,18 @@ fn draw_map(
         draw_arrow(host, batch, me, yaw, 1.0);
     }
     // Top: where the middle of the map is and how far a cell reaches.
-    let middle = (player.0 + pan.0, player.1 + pan.1);
     let top = format!(
-        "X {}  Z {}   ·   {} blocks per cell   ·   {} waypoints",
+        "X {}  Z {}   ·   {} blocks per cell   ·   {} waypoints   ·   {} tiles seen",
         middle.0,
         middle.1,
         zoom,
-        state.waypoints.len()
+        state.waypoints.len(),
+        state.tiles.len()
     );
     host.fill(batch, [0.0, 0.0, window[0], 15.0], 0xE0_08_08_0C);
     host.text(batch, &top, [6.0, 4.0], 0xFF_FF_FF_FF, true);
     // Bottom: the scale, and what the keys do.
-    let hint = format!(
-        "drag pans · wheel zooms ({zoom}) · B waypoint · C corner · M closes"
-    );
+    let hint = format!("drag pans · wheel zooms ({zoom}) · B waypoint · C corner · M closes");
     host.fill(batch, [0.0, window[1] - 17.0, window[0], 17.0], 0xE0_08_08_0C);
     host.text(batch, &hint, [6.0, window[1] - 13.0], MUTED, true);
     let scale_blocks = zoom * 32;
@@ -1444,10 +1415,6 @@ pub(super) fn on_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool)
             state.map_open
         };
         if open {
-            {
-                let mut state = state();
-                state.big_built = None;
-            }
             game.native_mod_screen_open(ID);
         } else if game.native_mod_screen() == Some(ID) {
             game.native_mod_screen_close(ID);

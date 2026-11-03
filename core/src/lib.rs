@@ -329,6 +329,25 @@ pub fn window_of(offset: usize, total: usize, visible: usize) -> (usize, usize) 
     (first, total.saturating_sub(first).min(visible))
 }
 
+/// The side of one stored map tile, in blocks. The map keeps every block it
+/// has seen, so terrain stays on it after the chunk unloads.
+pub const TILE: i32 = 16;
+/// How many tiles the map keeps before the oldest go (12288 tiles is about
+/// 3.1 million blocks, roughly 12 MB).
+pub const TILE_CAP: usize = 12288;
+
+/// Which tile a block belongs to.
+pub fn tile_key(x: i32, z: i32) -> (i32, i32) {
+    (x.div_euclid(TILE), z.div_euclid(TILE))
+}
+
+/// Where inside its tile a block sits.
+pub fn tile_slot(x: i32, z: i32) -> usize {
+    let column = x.rem_euclid(TILE) as usize;
+    let row = z.rem_euclid(TILE) as usize;
+    row * TILE as usize + column
+}
+
 /// The world lattice a map samples on: cells sit on multiples of `step`, so a
 /// grid rebuilt around a new centre covers exactly the same cell boundaries and
 /// the picture slides instead of shimmering.
@@ -650,6 +669,18 @@ mod tests {
         // Only the rows it was told about.
         let [_, below, _, _] = row(p, 4);
         assert_eq!(hit(p, 4, [x + 1.0, below + 1.0]), None);
+    }
+
+    #[test]
+    fn blocks_fall_into_tiles() {
+        assert_eq!(tile_key(0, 0), (0, 0));
+        assert_eq!(tile_key(15, 15), (0, 0));
+        assert_eq!(tile_key(16, -1), (1, -1));
+        assert_eq!(tile_slot(0, 0), 0);
+        assert_eq!(tile_slot(15, 0), 15);
+        assert_eq!(tile_slot(0, 1), 16);
+        assert_eq!(tile_slot(-1, -1), 255);
+        assert_eq!(TILE * TILE, 256);
     }
 
     #[test]
