@@ -28,7 +28,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.17.0";
+pub const VERSION: &str = "0.18.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -129,6 +129,9 @@ struct State {
     mini_at: Option<std::time::Instant>,
     /// The minimap's zoom: blocks per cell.
     mini_zoom: u32,
+    /// How often the minimap may resample, in milliseconds: 42 is 24 times a
+    /// second, and it steps down by itself while a resample takes long.
+    mini_every: u128,
     /// How far the world map is dragged from the player, in blocks.
     pan: (i32, i32),
     /// The waypoints the world map shows.
@@ -167,6 +170,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     mini_center: None,
     mini_at: None,
     mini_zoom: 1,
+    mini_every: 42,
     pan: (0, 0),
     waypoints: Vec::new(),
     map_said: false,
@@ -1046,19 +1050,35 @@ pub(super) fn refresh_minimap(game: &mut crate::game::Game<'_>) {
     let step = state().mini_zoom.max(1);
     {
         let state = state();
+        let every = state.mini_every;
         if let (Some((built, built_step)), Some(at)) = (state.mini_center, state.mini_at) {
-            if (built == center && built_step == step) || at.elapsed().as_millis() < 100 {
+            if (built == center && built_step == step) || at.elapsed().as_millis() < every {
                 return;
             }
         }
     }
+    let started = std::time::Instant::now();
     let (grid, loaded, debug) = sample(game, center, step as i32, logic::MINI, logic::MINI);
+    // 24 times a second while a resample is cheap, less when it is not.
+    let micros = started.elapsed().as_micros();
+    let every = if micros > 6_000 {
+        83
+    } else if micros > 3_000 {
+        55
+    } else {
+        42
+    };
     let total = (logic::MINI * logic::MINI) as usize;
     let mut state = state();
     state.mini_grid = grid;
     state.mini_center = Some((center, step));
     state.mini_at = Some(std::time::Instant::now());
-    state.map_debug = format!("minimap {loaded}/{total} loaded · chunks {} · {debug}", game.world.chunks.len());
+    state.mini_every = every;
+    state.map_debug = format!(
+        "minimap {loaded}/{total} loaded · {every} ms · {} µs · chunks {} · {debug}",
+        micros,
+        game.world.chunks.len()
+    );
     let first = !state.map_said;
     state.map_said = true;
     drop(state);
