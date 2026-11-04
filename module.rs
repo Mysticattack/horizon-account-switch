@@ -29,7 +29,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.27.0";
+pub const VERSION: &str = "0.28.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -1218,6 +1218,13 @@ fn map_pixel(colour: u8, height: i32) -> u32 {
     logic::pack_cell(rgb, height)
 }
 
+/// The block the player's eyes are at, for the layer the map should show.
+fn player_head(game: &crate::game::Game<'_>) -> i32 {
+    game.player
+        .as_ref()
+        .map_or(0, |player| (player.position.y + 1.62).floor() as i32)
+}
+
 /// The player's column, to the block.
 fn player_center(game: &crate::game::Game<'_>) -> Option<(i32, i32)> {
     let position = game.player.as_ref()?.position;
@@ -1291,6 +1298,7 @@ pub(super) fn explore(game: &mut crate::game::Game<'_>) {
             .map_or(true, |at| at.elapsed().as_secs() >= 2)
     };
     let started = std::time::Instant::now();
+    let head = player_head(game);
     let half = (logic::MINI / 2) as i32;
     let mut loaded = 0usize;
     let mut debug = String::from("centre: not loaded");
@@ -1309,7 +1317,19 @@ pub(super) fn explore(game: &mut crate::game::Game<'_>) {
                     continue;
                 }
                 loaded += 1;
-                let surface = world.world_surface(x, z, is_air);
+                // Under a roof, in a cave or in the Nether, the map shows the
+                // floor at head height instead of the ground above it: that is
+                // the layer the player is actually in.
+                let covered = world.light(x, head, z) >> 4 == 0;
+                let surface = if covered {
+                    let mut y = head;
+                    while y > -64 && is_air(world.block(x, y, z)) {
+                        y -= 1;
+                    }
+                    y + 1
+                } else {
+                    world.world_surface(x, z, is_air)
+                };
                 let block = world.block(x, surface - 1, z);
                 let entry = facts.states.get(block.0 as usize);
                 let colour = entry.map_or(0, |state| state.map_color);
