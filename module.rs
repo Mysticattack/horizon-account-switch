@@ -29,7 +29,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.29.0";
+pub const VERSION: &str = "0.30.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -996,6 +996,45 @@ pub(super) fn wheel(
 
 
 
+/// Shared waypoints travel as mod messages on this channel: a Horizon host
+/// passes them on, so two players with this mod need no plugin on any world it
+/// hosts. A message is `wp <x> <z> <name>` in UTF-8.
+const SHARE_CHANNEL: &str = "account_switch:map";
+
+/// A mod message from the server (`native_net_from_server`'s hook): a waypoint
+/// another player shared with us.
+pub(super) fn shared(_game: &mut crate::game::Game<'_>, channel: &str, data: &[u8]) {
+    if channel != SHARE_CHANNEL {
+        return;
+    }
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    let mut words = text.split_whitespace();
+    if words.next() != Some("wp") {
+        return;
+    }
+    let (Some(x), Some(z)) = (words.next(), words.next()) else {
+        return;
+    };
+    let (Ok(x), Ok(z)) = (x.parse::<i32>(), z.parse::<i32>()) else {
+        return;
+    };
+    let name: String = words.collect::<Vec<_>>().join(" ");
+    let name = if name.is_empty() {
+        format!("WP {x}")
+    } else {
+        name
+    };
+    let mut state = state();
+    if state.waypoints.iter().any(|(wx, wz, _)| *wx == x && *wz == z) {
+        return;
+    }
+    state.waypoints.push((x, z, name.clone()));
+    drop(state);
+    tell(format!("Waypoint {name} shared with you ({x}, {z})"));
+}
+
 /// A text in the player's language: German unless English is chosen.
 fn t(de: &str, en: &str) -> String {
     if state().lang_en {
@@ -1736,6 +1775,33 @@ pub(super) fn command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut
                 _ => "Use /wp rename <number> <name>".to_string(),
             }
         }
+        "share" => {
+            let number = rest.first().and_then(|word| word.parse::<usize>().ok());
+            let picked = {
+                let state = state();
+                number.and_then(|number| {
+                    state
+                        .waypoints
+                        .get(number.wrapping_sub(1))
+                        .map(|waypoint| waypoint.clone())
+                })
+            };
+            match picked {
+                Some((x, z, name)) => {
+                    let data = format!("wp {x} {z} {name}");
+                    // The host passes mod messages on, so nobody needs a plugin.
+                    let host: &mut dyn crate::mod_api::Host = game;
+                    match host.net_send_to_server(SHARE_CHANNEL, data.as_bytes()) {
+                        Ok(()) => format!("Waypoint {name} shared with everyone here"),
+                        Err(why) => t(
+                            &format!("Teilen geht hier nicht: {why}"),
+                            &format!("Sharing is not possible here: {why}"),
+                        ),
+                    }
+                }
+                None => t("Kein Waypoint mit dieser Nummer", "No waypoint with that number"),
+            }
+        }
         "list" => {
             let state = state();
             if state.waypoints.is_empty() {
@@ -1754,7 +1820,10 @@ pub(super) fn command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut
             state.waypoints.clear();
             format!("{count} waypoints removed")
         }
-        _ => "wp add [name] · wp del <number|name> · wp rename <number> <name> · wp list · wp clear".to_string(),
+        _ => t(
+            "wp add [Name] · wp del <Nummer|Name> · wp rename <Nummer> <Name> · wp share <Nummer> <Spieler> · wp list · wp clear",
+            "wp add [name] · wp del <number|name> · wp rename <number> <name> · wp share <number> <player> · wp list · wp clear",
+        ),
     };
     tell(answer);
 }

@@ -1,6 +1,6 @@
 [mod]
 id = "account_switch"
-version = "0.29.0"
+version = "0.30.0"
 priority = 100
 
 # The commit this bundle was written and built against. `horizon-launcher
@@ -148,6 +148,19 @@ bindings = [
   { name = "screen", ty = "&crate::mod_api::NativeScreenView<'_>", value = "&*screen" },
   { name = "scroll", ty = "[f64; 2]", value = "scroll" },
   { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+# Shared waypoints arrive as mod messages: a Horizon host passes them on, so
+# two players with this mod need no plugin at all.
+[[injection]]
+id = "net_from_server"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_net_from_server"
+helper = "net_from_server.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "channel", ty = "&str", value = "channel" },
+  { name = "data", ty = "&[u8]", value = "data" },
 ]
 
 # The /wp chat command, and its name for the chat box.
