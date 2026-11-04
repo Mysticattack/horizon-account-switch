@@ -29,7 +29,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.28.0";
+pub const VERSION: &str = "0.29.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -157,6 +157,8 @@ struct State {
     name_open: bool,
     name_text: String,
     name_at: (i32, i32),
+    /// The map's texts in English rather than German.
+    lang_en: bool,
     /// Map settings the player can change on the mod's page.
     minimap_size: f32,
     minimap_round: bool,
@@ -206,6 +208,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     name_open: false,
     name_text: String::new(),
     name_at: (0, 0),
+    lang_en: false,
     minimap_size: logic::MINIMAP,
     minimap_round: true,
     minimap_rotate: false,
@@ -993,6 +996,15 @@ pub(super) fn wheel(
 
 
 
+/// A text in the player's language: German unless English is chosen.
+fn t(de: &str, en: &str) -> String {
+    if state().lang_en {
+        en.to_string()
+    } else {
+        de.to_string()
+    }
+}
+
 /// What one world's map holds: a colour and a height per block, in tiles.
 type Tiles = BTreeMap<(i32, i32), Box<[u32; TILE_CELLS]>>;
 
@@ -1637,22 +1649,30 @@ fn draw_name(
     ];
     draw_box(host, batch, panel, PANEL, BORDER);
     let state = state();
-    let title = format!("Waypoint at {}, {}", state.name_at.0, state.name_at.1);
+    let title = format!(
+        "{} {}, {}",
+        t("Waypoint bei", "Waypoint at"),
+        state.name_at.0,
+        state.name_at.1
+    );
     host.text(batch, &title, [panel[0] + 12.0, panel[1] + 10.0], TITLE_TEXT, true);
     let field = [panel[0] + 12.0, panel[1] + 30.0, width - 24.0, 20.0];
     draw_box(host, batch, field, ROW_FILL, ROW_BORDER_HOVER);
     let text = if state.name_text.is_empty() {
-        "name it, Enter saves".to_string()
+        t("Name eingeben, Enter speichert", "name it, Enter saves")
     } else {
         state.name_text.clone()
     };
     let colour = if state.name_text.is_empty() { MUTED } else { CODE };
     host.text(batch, &text, [field[0] + 6.0, field[1] + 6.0], colour, true);
-    let hint = "Enter saves · Esc cancels · Backspace deletes";
-    let hint_width = game.native_text_width(hint);
+    let hint = t(
+        "Enter speichert · Esc bricht ab · Backspace loescht",
+        "Enter saves · Esc cancels · Backspace deletes",
+    );
+    let hint_width = game.native_text_width(&hint);
     host.text(
         batch,
-        hint,
+        &hint,
         [panel[0] + (width - hint_width) / 2.0, panel[1] + 62.0],
         MUTED,
         true,
@@ -1915,9 +1935,11 @@ fn draw_map(
     if !cursor_text.is_empty() {
         host.text(batch, &cursor_text, [area[0] + 4.0, area[1] + 2.0], 0xFF_FF_FF_FF, true);
     }
-    let hint = format!(
-        "drag/WASD pans · wheel zooms ({zoom}) · Space back to you · B waypoint · G grid · M closes"
-    );
+    let hint = if state.lang_en {
+        format!("drag/WASD pans · wheel zooms ({zoom}) · Space back to you · B waypoint · G grid · M closes")
+    } else {
+        format!("ziehen/WASD schiebt · Rad zoomt ({zoom}) · Space zu dir · B Waypoint · G Gitter · M schliesst")
+    };
     host.fill(batch, [0.0, window[1] - 17.0, window[0], 17.0], 0xE0_08_08_0C);
     host.text(batch, &hint, [6.0, window[1] - 13.0], MUTED, true);
     let scale_blocks = zoom * 32;
@@ -2142,24 +2164,50 @@ pub(super) fn page(mod_id: &str, buttons: &mut Vec<String>) {
     // Below the accounts: the map's own settings.
     let state = state();
     buttons.push(format!(
-        "Minimap corner: {} (click to move)",
+        "{}: {} (click)",
+        t("Minimap-Ecke", "Minimap corner"),
         logic::corner_name(state.corner)
     ));
-    buttons.push(format!("Minimap size: {} px (click)", state.minimap_size as i32));
     buttons.push(format!(
-        "Minimap shape: {} (click)",
-        if state.minimap_round { "round" } else { "square" }
+        "{}: {} px (click)",
+        t("Minimap-Groesse", "Minimap size"),
+        state.minimap_size as i32
     ));
     buttons.push(format!(
-        "Minimap turns with you: {} (click)",
-        if state.minimap_rotate { "on" } else { "off" }
+        "{}: {} (click)",
+        t("Minimap-Form", "Minimap shape"),
+        if state.minimap_round {
+            t("rund", "round")
+        } else {
+            t("eckig", "square")
+        }
     ));
     buttons.push(format!(
-        "Coordinates under the map: {} (click)",
-        if state.coords_on { "on" } else { "off" }
+        "{}: {} (click)",
+        t("Minimap dreht mit", "Minimap turns with you"),
+        if state.minimap_rotate {
+            t("an", "on")
+        } else {
+            t("aus", "off")
+        }
     ));
     buttons.push(format!(
-        "Waypoints: {} in this world (click deletes the last)",
+        "{}: {} (click)",
+        t("Koordinaten unter der Karte", "Coordinates under the map"),
+        if state.coords_on {
+            t("an", "on")
+        } else {
+            t("aus", "off")
+        }
+    ));
+    buttons.push(format!(
+        "{}: {} (click)",
+        t("Sprache", "Language"),
+        if state.lang_en { "English" } else { "Deutsch" }
+    ));
+    buttons.push(format!(
+        "{}: {} (click)",
+        t("Waypoints in dieser Welt", "Waypoints in this world"),
         state.waypoints.len()
     ));
 }
@@ -2200,6 +2248,13 @@ pub(super) fn clicked_page(game: &mut crate::game::Game<'_>, mod_id: &str, butto
                 format!(
                     "minimap turns with you: {}",
                     if state.minimap_rotate { "on" } else { "off" }
+                )
+            }
+            5 => {
+                state.lang_en = !state.lang_en;
+                format!(
+                    "language: {}",
+                    if state.lang_en { "English" } else { "Deutsch" }
                 )
             }
             4 => {
