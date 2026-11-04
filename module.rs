@@ -29,7 +29,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.24.0";
+pub const VERSION: &str = "0.25.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -50,6 +50,10 @@ pub const MINI_OUT_KEY: &str = "minimap_zoom_out";
 pub const MINI_OUT_DEFAULT: &str = "key.keyboard.bracketleft";
 pub const MINI_IN_KEY: &str = "minimap_zoom_in";
 pub const MINI_IN_DEFAULT: &str = "key.keyboard.bracketright";
+
+/// The key that removes the waypoint the player stands on.
+pub const WAYPOINT_DEL_KEY: &str = "waypoint_del";
+pub const WAYPOINT_DEL_DEFAULT: &str = "key.keyboard.backspace";
 
 /// The waypoint key: a marker where the player stands, as the World Map has it.
 pub const WAYPOINT_KEY: &str = "waypoint";
@@ -141,8 +145,19 @@ struct State {
     mini_every: u128,
     /// How far the world map is dragged from the player, in blocks.
     pan: (i32, i32),
-    /// The waypoints the world map shows.
-    waypoints: Vec<(i32, i32)>,
+    /// The world map draws a chunk grid.
+    grid: bool,
+    /// The waypoints of this world: where, and what they are called.
+    waypoints: Vec<(i32, i32, String)>,
+    /// The name window is open: the text, and where the waypoint goes.
+    name_open: bool,
+    name_text: String,
+    name_at: (i32, i32),
+    /// Map settings the player can change on the mod's page.
+    minimap_size: f32,
+    minimap_round: bool,
+    minimap_rotate: bool,
+    coords_on: bool,
     /// The build said what it found, once.
     map_said: bool,
     /// What the last build found, for the map screen's own line.
@@ -180,7 +195,15 @@ static STATE: Mutex<State> = Mutex::new(State {
     explored_full: None,
     mini_every: 42,
     pan: (0, 0),
+    grid: false,
     waypoints: Vec::new(),
+    name_open: false,
+    name_text: String::new(),
+    name_at: (0, 0),
+    minimap_size: logic::MINIMAP,
+    minimap_round: true,
+    minimap_rotate: false,
+    coords_on: true,
     map_said: false,
     map_debug: String::new(),
     corner: 1,
@@ -689,6 +712,10 @@ pub(super) fn draw(
     }
     if state().map_open {
         draw_map(game, batch, screen);
+        return;
+    }
+    if state().name_open {
+        draw_name(game, batch, screen);
         return;
     }
     let view = view();
@@ -1298,10 +1325,10 @@ pub(super) fn minimap(
     }
     *minimap = Some(crate::game::native_hooks::NativeMinimap {
         corner: crate::extras::Corner::ALL[state.corner % crate::extras::Corner::ALL.len()],
-        size: logic::MINIMAP,
+        size: state.minimap_size,
         blocks_per_pixel: state.mini_bpp,
-        rotate: false,
-        round: true,
+        rotate: state.minimap_rotate,
+        round: state.minimap_round,
     });
 }
 
@@ -1324,7 +1351,7 @@ pub(super) fn hud_post(
         return;
     };
     let host: &dyn crate::mod_api::Host = game;
-    let side = logic::MINIMAP;
+    let side = state.minimap_size;
     let at = logic::minimap_at([batch.width, batch.height], state.corner, side);
     // The game draws the map itself; this is the frame around it, the compass
     // letters, and the coordinates underneath.
@@ -1352,6 +1379,23 @@ pub(super) fn hud_post(
             true,
         );
     }
+    // Waypoints on the disc, pinned to the edge when they are out of reach.
+    let radius = side / 2.0;
+    for waypoint in &state.waypoints {
+        let dx = (waypoint.0 as f64 - player.position.x) as f32 / state.mini_bpp;
+        let dz = (waypoint.1 as f64 - player.position.z) as f32 / state.mini_bpp;
+        let distance = (dx * dx + dz * dz).sqrt();
+        let limit = radius - 3.0;
+        let (px, py) = if distance > limit && distance > 0.0 {
+            (at[0] + radius + dx / distance * limit, at[1] + radius + dz / distance * limit)
+        } else {
+            (at[0] + radius + dx, at[1] + radius + dz)
+        };
+        draw_waypoint(host, batch, [px, py], 4.0);
+    }
+    if !state.coords_on {
+        return;
+    }
     let line = logic::coords(
         player.position.x.floor() as i32,
         player.position.y.floor() as i32,
@@ -1362,6 +1406,97 @@ pub(super) fn hud_post(
     let top = at[1] + side + 7.0;
     host.fill(batch, [left, top, width + 6.0, 12.0], 0xC0_08_08_0C);
     host.text(batch, &line, [left + 3.0, top + 2.0], 0xFF_FF_FF_FF, true);
+}
+
+/// The name window: one line of text, the waypoint's place, and what the keys
+/// do. Enter saves, Escape cancels.
+fn draw_name(
+    game: &crate::game::Game<'_>,
+    batch: &mut crate::hud::HudBatch,
+    screen: &crate::mod_api::NativeScreenView<'_>,
+) {
+    let host: &dyn crate::mod_api::Host = game;
+    let window = [
+        screen.rect[0] + screen.rect[2],
+        screen.rect[1] + screen.rect[3],
+    ];
+    host.fill(batch, [0.0, 0.0, window[0], window[1]], VEIL);
+    let width = 280.0;
+    let panel = [
+        (window[0] - width) / 2.0,
+        (window[1] - 96.0) / 2.0,
+        width,
+        96.0,
+    ];
+    draw_box(host, batch, panel, PANEL, BORDER);
+    let state = state();
+    let title = format!("Waypoint at {}, {}", state.name_at.0, state.name_at.1);
+    host.text(batch, &title, [panel[0] + 12.0, panel[1] + 10.0], TITLE_TEXT, true);
+    let field = [panel[0] + 12.0, panel[1] + 30.0, width - 24.0, 20.0];
+    draw_box(host, batch, field, ROW_FILL, ROW_BORDER_HOVER);
+    let text = if state.name_text.is_empty() {
+        "name it, Enter saves".to_string()
+    } else {
+        state.name_text.clone()
+    };
+    let colour = if state.name_text.is_empty() { MUTED } else { CODE };
+    host.text(batch, &text, [field[0] + 6.0, field[1] + 6.0], colour, true);
+    let hint = "Enter saves · Esc cancels · Backspace deletes";
+    let hint_width = game.native_text_width(hint);
+    host.text(
+        batch,
+        hint,
+        [panel[0] + (width - hint_width) / 2.0, panel[1] + 62.0],
+        MUTED,
+        true,
+    );
+}
+
+/// A character typed on the mod's name window
+/// (`native_screen_char_typed_pre`): the waypoint's name.
+pub(super) fn typed(c: char, canceled: &mut bool) {
+    let mut state = state();
+    if !state.name_open {
+        return;
+    }
+    *canceled = true;
+    if c.is_control() || state.name_text.chars().count() >= 24 {
+        return;
+    }
+    state.name_text.push(c);
+}
+
+/// A key on the mod's name window (`native_screen_key_pressed_pre`): Enter
+/// saves, Escape cancels, Backspace takes a character back.
+pub(super) fn screen_key(key: &str, canceled: &mut bool) {
+    let mut state = state();
+    if !state.name_open {
+        return;
+    }
+    *canceled = true;
+    match key {
+        "key.keyboard.enter" | "key.keyboard.keypad.enter" => {
+            let name = if state.name_text.trim().is_empty() {
+                format!("WP {}", state.waypoints.len() + 1)
+            } else {
+                state.name_text.trim().to_string()
+            };
+            let at = state.name_at;
+            state.waypoints.push((at.0, at.1, name.clone()));
+            state.name_open = false;
+            state.name_text.clear();
+            drop(state);
+            tell(format!("Waypoint {name} set"));
+        }
+        "key.keyboard.escape" => {
+            state.name_open = false;
+            state.name_text.clear();
+        }
+        "key.keyboard.backspace" => {
+            state.name_text.pop();
+        }
+        _ => {}
+    }
 }
 
 /// Dragging on the mod's own screen pans the world map by the mouse's own
@@ -1438,6 +1573,25 @@ fn draw_map(
         let at = [area[0] + area[2] / 2.0 + dx, area[1] + area[3] / 2.0 + dz];
         if at[0] > area[0] && at[0] < area[0] + area[2] && at[1] > area[1] && at[1] < area[1] + area[3] {
             draw_waypoint(host, batch, at, 5.0);
+            let away = ((waypoint.0 - player.0).pow(2) + (waypoint.1 - player.1).pow(2)) as f32;
+            let label = format!("{} · {} m", waypoint.2, away.sqrt().round() as i32);
+            host.text(batch, &label, [at[0] + 5.0, at[1] - 4.0], 0xFF_FF_FF_FF, true);
+        }
+    }
+    // A chunk grid, when it is on.
+    if state.grid {
+        let chunk = (16.0 / zoom as f32) * cell;
+        if chunk >= 4.0 {
+            let mut x = area[0] + ((-middle.0 as f32 * cell / zoom as f32) % chunk + chunk) % chunk;
+            while x < area[0] + area[2] {
+                host.fill(batch, [x, area[1], 1.0, area[3]], 0x30_FF_FF_FF);
+                x += chunk;
+            }
+            let mut y = area[1] + ((-middle.1 as f32 * cell / zoom as f32) % chunk + chunk) % chunk;
+            while y < area[1] + area[3] {
+                host.fill(batch, [area[0], y, area[2], 1.0], 0x30_FF_FF_FF);
+                y += chunk;
+            }
         }
     }
     if me[0] > area[0] && me[0] < area[0] + area[2] && me[1] > area[1] && me[1] < area[1] + area[3] {
@@ -1457,7 +1611,21 @@ fn draw_map(
     host.fill(batch, [0.0, 0.0, window[0], 15.0], 0xE0_08_08_0C);
     host.text(batch, &top, [6.0, 4.0], 0xFF_FF_FF_FF, true);
     // Bottom: the scale, and what the keys do.
-    let hint = format!("drag pans · wheel zooms ({zoom}) · B waypoint · C corner · M closes");
+    // What the pointer points at, and the keys.
+    let (mx, my) = (screen.mouse[0], screen.mouse[1]);
+    let cursor_text = if mx > area[0] && mx < area[0] + area[2] && my > area[1] && my < area[1] + area[3] {
+        let bx = middle.0 + ((mx - area[0] - area[2] / 2.0) * zoom as f32 / cell) as i32;
+        let bz = middle.1 + ((my - area[1] - area[3] / 2.0) * zoom as f32 / cell) as i32;
+        format!("{} {}", bx, bz)
+    } else {
+        String::new()
+    };
+    if !cursor_text.is_empty() {
+        host.text(batch, &cursor_text, [area[0] + 4.0, area[1] + 2.0], 0xFF_FF_FF_FF, true);
+    }
+    let hint = format!(
+        "drag/WASD pans · wheel zooms ({zoom}) · Space back to you · B waypoint · G grid · M closes"
+    );
     host.fill(batch, [0.0, window[1] - 17.0, window[0], 17.0], 0xE0_08_08_0C);
     host.text(batch, &hint, [6.0, window[1] - 13.0], MUTED, true);
     let scale_blocks = zoom * 32;
@@ -1481,6 +1649,28 @@ fn draw_map(
 
 pub(super) fn on_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
     if !game.native_window() {
+        return;
+    }
+    // Keys the world map takes while it is open.
+    if pressed && state().map_open {
+        let zoom = state().map_zoom.max(1) as i32;
+        let step = 16 * zoom;
+        match key {
+            "key.keyboard.space" => {
+                state().pan = (0, 0);
+                return;
+            }
+            "key.keyboard.g" => {
+                let mut state = state();
+                state.grid = !state.grid;
+                return;
+            }
+            "key.keyboard.up" | "key.keyboard.w" => state().pan.1 -= step,
+            "key.keyboard.down" | "key.keyboard.s" => state().pan.1 += step,
+            "key.keyboard.left" | "key.keyboard.a" => state().pan.0 -= step,
+            "key.keyboard.right" | "key.keyboard.d" => state().pan.0 += step,
+            _ => return,
+        }
         return;
     }
     // The map key: the world map opens and closes.
@@ -1515,21 +1705,50 @@ pub(super) fn on_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool)
         }
         return;
     }
-    // The waypoint key: a marker where the player stands, as the World Map has it.
+    // The waypoint key: a name window for a marker where the player stands.
     if key == game.native_mod_key(ID, WAYPOINT_KEY, WAYPOINT_DEFAULT) {
-        if pressed && game.native_playing()
-            && let Some(center) = player_center(game)
+        if !pressed || !game.native_playing() {
+            return;
+        }
+        let Some(center) = player_center(game) else {
+            return;
+        };
         {
             let mut state = state();
-            if !state.waypoints.contains(&center) {
-                state.waypoints.push(center);
-                if state.waypoints.len() > 64 {
-                    state.waypoints.remove(0);
-                }
-            }
-            let count = state.waypoints.len();
-            drop(state);
-            tell(format!("Waypoint at {},{} ({count} set)", center.0, center.1));
+            state.name_open = true;
+            state.name_at = center;
+            state.name_text.clear();
+        }
+        game.native_mod_screen_open(ID);
+        return;
+    }
+    // Removing: the waypoint you stand on, or the nearest one.
+    if key == game.native_mod_key(ID, WAYPOINT_DEL_KEY, WAYPOINT_DEL_DEFAULT) {
+        if !pressed || !game.native_playing() {
+            return;
+        }
+        let Some(center) = player_center(game) else {
+            return;
+        };
+        let removed = {
+            let mut state = state();
+            let nearest = state
+                .waypoints
+                .iter()
+                .enumerate()
+                .map(|(index, waypoint)| {
+                    let dx = waypoint.0 - center.0;
+                    let dz = waypoint.1 - center.1;
+                    (dx * dx + dz * dz, index)
+                })
+                .filter(|(distance, _)| *distance <= 8 * 8)
+                .min_by_key(|(distance, _)| *distance)
+                .map(|(_, index)| index);
+            nearest.map(|index| state.waypoints.remove(index).2)
+        };
+        match removed {
+            Some(name) => tell(format!("Waypoint {name} removed")),
+            None => tell("No waypoint within eight blocks".to_string()),
         }
         return;
     }
@@ -1618,10 +1837,28 @@ pub(super) fn page(mod_id: &str, buttons: &mut Vec<String>) {
         refresh_accounts();
     }
     buttons.extend(view.rows().into_iter().map(|(_, label)| label));
-    // Below the accounts: which corner the minimap shows in.
+    // Below the accounts: the map's own settings.
+    let state = state();
     buttons.push(format!(
         "Minimap corner: {} (click to move)",
-        logic::corner_name(state().corner)
+        logic::corner_name(state.corner)
+    ));
+    buttons.push(format!("Minimap size: {} px (click)", state.minimap_size as i32));
+    buttons.push(format!(
+        "Minimap shape: {} (click)",
+        if state.minimap_round { "round" } else { "square" }
+    ));
+    buttons.push(format!(
+        "Minimap turns with you: {} (click)",
+        if state.minimap_rotate { "on" } else { "off" }
+    ));
+    buttons.push(format!(
+        "Coordinates under the map: {} (click)",
+        if state.coords_on { "on" } else { "off" }
+    ));
+    buttons.push(format!(
+        "Waypoints: {} in this world (click deletes the last)",
+        state.waypoints.len()
     ));
 }
 
@@ -1633,13 +1870,54 @@ pub(super) fn clicked_page(game: &mut crate::game::Game<'_>, mod_id: &str, butto
     let view = view();
     let rows = view.rows();
     if button >= rows.len() {
-        // The corner row: the next corner.
+        // The map's own rows, in the order `page` pushes them.
         let mut state = state();
-        state.corner = logic::corner(state.corner + 1);
-        let name = logic::corner_name(state.corner);
+        let line = match button - rows.len() {
+            0 => {
+                state.corner = logic::corner(state.corner + 1);
+                format!("minimap corner {}", logic::corner_name(state.corner))
+            }
+            1 => {
+                state.minimap_size = match state.minimap_size as i32 {
+                    96 => 128.0,
+                    128 => 160.0,
+                    160 => 72.0,
+                    _ => 96.0,
+                };
+                format!("minimap size {} px", state.minimap_size as i32)
+            }
+            2 => {
+                state.minimap_round = !state.minimap_round;
+                format!(
+                    "minimap {}",
+                    if state.minimap_round { "round" } else { "square" }
+                )
+            }
+            3 => {
+                state.minimap_rotate = !state.minimap_rotate;
+                format!(
+                    "minimap turns with you: {}",
+                    if state.minimap_rotate { "on" } else { "off" }
+                )
+            }
+            4 => {
+                state.coords_on = !state.coords_on;
+                format!(
+                    "coordinates: {}",
+                    if state.coords_on { "on" } else { "off" }
+                )
+            }
+            _ => {
+                let gone = state.waypoints.pop();
+                match gone {
+                    Some((_, _, name)) => format!("waypoint {name} removed"),
+                    None => "no waypoints in this world".to_string(),
+                }
+            }
+        };
         drop(state);
         game.system_message(horizon_client::text::Text::literal(format!(
-            "Account Switch: minimap corner {name}"
+            "Account Switch: {line}"
         )));
         return;
     }

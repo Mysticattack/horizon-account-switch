@@ -1,6 +1,6 @@
 [mod]
 id = "account_switch"
-version = "0.24.0"
+version = "0.25.0"
 priority = 100
 
 # The commit this bundle was written and built against. `horizon-launcher
@@ -147,6 +147,27 @@ bindings = [
   { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
   { name = "screen", ty = "&crate::mod_api::NativeScreenView<'_>", value = "&*screen" },
   { name = "scroll", ty = "[f64; 2]", value = "scroll" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+# The name window: its characters and its keys.
+[[injection]]
+id = "screen_char"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_char_typed_pre"
+helper = "typed.rs"
+bindings = [
+  { name = "c", ty = "char", value = "c" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+[[injection]]
+id = "screen_key"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_key_pressed_pre"
+helper = "screen_key.rs"
+bindings = [
+  { name = "key", ty = "&str", value = "key" },
   { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
 ]
 
