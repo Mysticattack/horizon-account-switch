@@ -29,7 +29,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.25.0";
+pub const VERSION: &str = "0.26.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -142,6 +142,10 @@ struct State {
     explored_at: Option<((i32, i32), std::time::Instant)>,
     /// When the last full pass ran; between passes only unseen blocks are read.
     explored_full: Option<std::time::Instant>,
+    /// When the map was last written to the mod's data folder.
+    saved_at: Option<std::time::Instant>,
+    /// The player was dead last frame, for the death waypoint.
+    was_dead: bool,
     mini_every: u128,
     /// How far the world map is dragged from the player, in blocks.
     pan: (i32, i32),
@@ -193,6 +197,8 @@ static STATE: Mutex<State> = Mutex::new(State {
     active: String::new(),
     explored_at: None,
     explored_full: None,
+    saved_at: None,
+    was_dead: false,
     mini_every: 42,
     pan: (0, 0),
     grid: false,
@@ -1018,6 +1024,120 @@ impl State {
     }
 }
 
+/// The file a world's map lives in: `horizon-mods/.horizon-mod-data/account_switch/`,
+/// one per server and dimension, so the map is still there tomorrow.
+fn map_path(game: &crate::game::Game<'_>, key: &str) -> std::path::PathBuf {
+    let safe: String = key
+        .chars()
+        .map(|letter| {
+            if letter.is_ascii_alphanumeric() || matches!(letter, '-' | '.' | '_') {
+                letter
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    game.native_data_dir(ID).join(format!("{safe}.map"))
+}
+
+/// Writes the world's map to that file: a small header, then per tile its
+/// coordinates and its 256 cells.
+fn save_map(game: &crate::game::Game<'_>) {
+    let state = state();
+    if state.active.is_empty() || state.tiles.is_empty() {
+        return;
+    }
+    let path = map_path(game, &state.active);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut bytes = Vec::with_capacity(64 + state.tiles.len() * 1032);
+    bytes.extend_from_slice(b"ASM1");
+    bytes.extend_from_slice(&(state.tiles.len() as u32).to_le_bytes());
+    for (key, tile) in &state.tiles {
+        bytes.extend_from_slice(&key.0.to_le_bytes());
+        bytes.extend_from_slice(&key.1.to_le_bytes());
+        for cell in tile.iter() {
+            bytes.extend_from_slice(&cell.to_le_bytes());
+        }
+    }
+    let _ = std::fs::write(&path, bytes);
+}
+
+/// Reads a world's map back, if there is one.
+fn load_map(game: &crate::game::Game<'_>, key: &str) {
+    let Ok(bytes) = std::fs::read(map_path(game, key)) else {
+        return;
+    };
+    if bytes.len() < 8 || &bytes[0..4] != b"ASM1" {
+        return;
+    }
+    let count = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    let mut at = 8;
+    let mut state = state();
+    for _ in 0..count {
+        if at + 8 + TILE_CELLS * 4 > bytes.len() {
+            break;
+        }
+        let x = i32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+        let z = i32::from_le_bytes([bytes[at + 4], bytes[at + 5], bytes[at + 6], bytes[at + 7]]);
+        at += 8;
+        let mut tile = Box::new([0u32; TILE_CELLS]);
+        for cell in tile.iter_mut() {
+            *cell = u32::from_le_bytes([
+                bytes[at],
+                bytes[at + 1],
+                bytes[at + 2],
+                bytes[at + 3],
+            ]);
+            at += 4;
+        }
+        state.tiles.insert((x, z), tile);
+        state.tile_order.push_back((x, z));
+        while state.tile_order.len() > logic::TILE_CAP {
+            if let Some(oldest) = state.tile_order.pop_front() {
+                state.tiles.remove(&oldest);
+            }
+        }
+    }
+}
+
+/// A world's waypoints sit next to its map, one line each: `x z name`.
+fn save_waypoints(game: &crate::game::Game<'_>) {
+    let state = state();
+    if state.active.is_empty() {
+        return;
+    }
+    let mut text = String::new();
+    for (x, z, name) in &state.waypoints {
+        text.push_str(&format!("{x} {z} {name}\n"));
+    }
+    let path = map_path(game, &state.active).with_extension("wp");
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, text);
+}
+
+/// Reads a world's waypoints back.
+fn load_waypoints(game: &crate::game::Game<'_>, key: &str) {
+    let Ok(text) = std::fs::read_to_string(map_path(game, key).with_extension("wp")) else {
+        return;
+    };
+    let mut state = state();
+    state.waypoints.clear();
+    for line in text.lines() {
+        let mut parts = line.splitn(3, ' ');
+        let (Some(x), Some(z), Some(name)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let (Ok(x), Ok(z)) = (x.parse::<i32>(), z.parse::<i32>()) else {
+            continue;
+        };
+        state.waypoints.push((x, z, name.to_string()));
+    }
+}
+
 /// What world the player is in: the server they joined and the dimension, the
 /// two things that make a map its own.
 fn world_key(game: &crate::game::Game<'_>) -> String {
@@ -1115,10 +1235,31 @@ pub(super) fn explore(game: &mut crate::game::Game<'_>) {
     let Some(center) = player_center(game) else {
         return;
     };
+    // A death point, once per death.
+    if let Some(player) = game.player.as_ref() {
+        let dead = player.health.dead_or_dying();
+        let mut state = state();
+        let fresh = dead && !state.was_dead;
+        state.was_dead = dead;
+        if fresh {
+            let name = format!("Death {}", state.waypoints.len() + 1);
+            state.waypoints.push((center.0, center.1, name.clone()));
+            drop(state);
+            tell(format!("Waypoint {name} set"));
+        }
+    }
+    // A new server or dimension gets its own map; the old one goes to disk and
+    // the new one comes back from it, so nothing is lost on a restart.
+    let key = world_key(game);
+    let changed = state().active != key;
+    if changed {
+        save_map(game);
+        save_waypoints(game);
+        state().activate(key.clone());
+        load_map(game, &key);
+        load_waypoints(game, &key);
+    }
     {
-        // A new server or dimension gets its own map.
-        let key = world_key(game);
-        let changed = state().activate(key);
         let state = state();
         if !changed && let Some((built, at)) = state.explored_at {
             if built == center || at.elapsed().as_millis() < state.mini_every {
@@ -1197,9 +1338,17 @@ pub(super) fn explore(game: &mut crate::game::Game<'_>) {
             "{loaded}/{} loaded · {tiles} tiles seen · {every} ms · {micros} µs · {debug}",
             (logic::MINI * logic::MINI) as usize
         );
+        let due = state.saved_at.map_or(true, |at| at.elapsed().as_secs() >= 30);
+        if due {
+            state.saved_at = Some(std::time::Instant::now());
+        }
         let first = !state.map_said;
         state.map_said = true;
         drop(state);
+        if due {
+            save_map(game);
+            save_waypoints(game);
+        }
         if first {
             tell(format!("Account Switch map: {loaded} blocks in reach seen"));
         }
