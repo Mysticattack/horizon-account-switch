@@ -29,7 +29,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.23.0";
+pub const VERSION: &str = "0.24.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -118,10 +118,10 @@ struct State {
     map_open: bool,
     /// Blocks per world map cell.
     map_zoom: u32,
-    /// The minimap's zoom: blocks per cell.
-    mini_zoom: u32,
-    /// The minimap was too dear to draw last frame: draw it half as fine.
-    mini_coarse: bool,
+    /// The minimap's zoom: blocks per pixel, as the game's own minimap takes it.
+    mini_bpp: f32,
+    /// The minimap is on.
+    minimap_on: bool,
     /// Every block the player has seen, one colour each, in tiles of
     /// `logic::TILE` blocks: the map keeps showing terrain after its chunk
     /// unloads, as Xaero's does. `tile_order` says which tile goes first when
@@ -170,8 +170,8 @@ static STATE: Mutex<State> = Mutex::new(State {
     zoom: None,
     map_open: false,
     map_zoom: 1,
-    mini_zoom: 1,
-    mini_coarse: false,
+    mini_bpp: 1.0,
+    minimap_on: true,
     tiles: BTreeMap::new(),
     tile_order: VecDeque::new(),
     parked: BTreeMap::new(),
@@ -1282,6 +1282,29 @@ fn draw_waypoint(
     host.fill(batch, [at[0] - 1.0, at[1] - size / 2.0, 3.0, size], 0xFF_40_E0_E0);
 }
 
+/// The minimap: the game's own renderer, which already does height shading,
+/// water, and the change to the cave or Nether layer. Painting every cell
+/// ourselves cost the player frames; this costs nothing worth counting.
+pub(super) fn minimap(
+    _game: &crate::game::Game<'_>,
+    minimap: &mut Option<crate::game::native_hooks::NativeMinimap>,
+) {
+    if minimap.is_some() {
+        return;
+    }
+    let state = state();
+    if !state.minimap_on {
+        return;
+    }
+    *minimap = Some(crate::game::native_hooks::NativeMinimap {
+        corner: crate::extras::Corner::ALL[state.corner % crate::extras::Corner::ALL.len()],
+        size: logic::MINIMAP,
+        blocks_per_pixel: state.mini_bpp,
+        rotate: false,
+        round: true,
+    });
+}
+
 /// The round minimap in its corner, over the hotbar's HUD layer
 /// (`native_gui_layer_post`, API 139), as Xaero's Minimap has it.
 pub(super) fn hud_post(
@@ -1293,67 +1316,18 @@ pub(super) fn hud_post(
     if !(layer == "minecraft:hotbar" || layer == "hotbar") || !game.native_playing() {
         return;
     }
-    let mut state = state();
-    if state.tiles.is_empty() {
+    let state = state();
+    if !state.minimap_on {
         return;
     }
-    let Some(centre) = player_center(game) else {
+    let Some(player) = game.player.as_ref() else {
         return;
     };
     let host: &dyn crate::mod_api::Host = game;
     let side = logic::MINIMAP;
     let at = logic::minimap_at([batch.width, batch.height], state.corner, side);
-    // A dark disc under the map, one fill per row, so the round edge does not
-    // show the world and blocks never seen have a background.
-    let radius = side / 2.0;
-    for row in 0..side as u32 {
-        let dy = row as f32 + 0.5 - radius;
-        let half = (radius * radius - dy * dy).max(0.0).sqrt();
-        if half <= 0.0 {
-            continue;
-        }
-        host.fill(
-            batch,
-            [at[0] + radius - half, at[1] + row as f32, half * 2.0, 1.0],
-            0xE0_08_08_0C,
-        );
-    }
-    // The part of a block the player stands past the last whole one: the map
-    // glides by it instead of stepping a whole cell.
-    let zoom = state.mini_zoom.max(1);
-    let cell = side / logic::MINI as f32;
-    let offset = game
-        .player
-        .as_ref()
-        .map(|player| {
-            [
-                -(player.position.x - centre.0 as f64) as f32 * cell / zoom as f32,
-                -(player.position.z - centre.1 as f64) as f32 * cell / zoom as f32,
-            ]
-        })
-        .unwrap_or([0.0, 0.0]);
-    // Draw it, and if that was dear, draw it half as fine from now on: frames
-    // matter more than the last pixel of detail.
-    let started = std::time::Instant::now();
-    let cells = if state.mini_coarse {
-        logic::MINI / 2
-    } else {
-        logic::MINI
-    };
-    draw_cells(
-        host,
-        batch,
-        [at[0], at[1], side, side],
-        &state,
-        centre,
-        offset,
-        zoom * logic::MINI / cells,
-        cells,
-        cells,
-        true,
-    );
-    state.mini_coarse = started.elapsed().as_micros() > 2_500 && cells == logic::MINI;
-    // The frame: dark outside, light inside, as the minimap's ring.
+    // The game draws the map itself; this is the frame around it, the compass
+    // letters, and the coordinates underneath.
     for square in logic::ring(side + 4.0, 3.0, 96) {
         host.fill(
             batch,
@@ -1378,25 +1352,16 @@ pub(super) fn hud_post(
             true,
         );
     }
-    if let Some(player) = game.player.as_ref() {
-        draw_arrow(
-            host,
-            batch,
-            [at[0] + side / 2.0, at[1] + side / 2.0],
-            player.yaw,
-            1.0,
-        );
-        let line = logic::coords(
-            player.position.x.floor() as i32,
-            player.position.y.floor() as i32,
-            player.position.z.floor() as i32,
-        );
-        let width = game.native_text_width(&line);
-        let left = at[0] + side / 2.0 - width / 2.0 - 3.0;
-        let top = at[1] + side + 7.0;
-        host.fill(batch, [left, top, width + 6.0, 12.0], 0xC0_08_08_0C);
-        host.text(batch, &line, [left + 3.0, top + 2.0], 0xFF_FF_FF_FF, true);
-    }
+    let line = logic::coords(
+        player.position.x.floor() as i32,
+        player.position.y.floor() as i32,
+        player.position.z.floor() as i32,
+    );
+    let width = game.native_text_width(&line);
+    let left = at[0] + side / 2.0 - width / 2.0 - 3.0;
+    let top = at[1] + side + 7.0;
+    host.fill(batch, [left, top, width + 6.0, 12.0], 0xC0_08_08_0C);
+    host.text(batch, &line, [left + 3.0, top + 2.0], 0xFF_FF_FF_FF, true);
 }
 
 /// Dragging on the mod's own screen pans the world map by the mouse's own
@@ -1539,14 +1504,14 @@ pub(super) fn on_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool)
     if key == game.native_mod_key(ID, MINI_OUT_KEY, MINI_OUT_DEFAULT) {
         if pressed {
             let mut state = state();
-            state.mini_zoom = logic::zoom_out(state.mini_zoom).clamp(1, 8);
+            state.mini_bpp = (state.mini_bpp * 2.0).clamp(0.5, 4.0);
         }
         return;
     }
     if key == game.native_mod_key(ID, MINI_IN_KEY, MINI_IN_DEFAULT) {
         if pressed {
             let mut state = state();
-            state.mini_zoom = logic::zoom_in(state.mini_zoom).clamp(1, 8);
+            state.mini_bpp = (state.mini_bpp / 2.0).clamp(0.5, 4.0);
         }
         return;
     }

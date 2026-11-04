@@ -1,6 +1,6 @@
 [mod]
 id = "account_switch"
-version = "0.23.0"
+version = "0.24.0"
 priority = 100
 
 # The commit this bundle was written and built against. `horizon-launcher
@@ -169,7 +169,19 @@ bindings = [
   { name = "claimed", ty = "&mut bool", value = "&mut *claimed" },
 ]
 
-# The minimap, drawn over the hotbar's HUD layer (API 139).
+# The minimap: the game's own renderer draws it (height shading, water, cave
+# and Nether layers), which is far cheaper than painting every cell ourselves.
+[[injection]]
+id = "minimap"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_minimap"
+helper = "minimap.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "minimap", ty = "&mut Option<crate::game::native_hooks::NativeMinimap>", value = "&mut *minimap" },
+]
+
+# Coordinates, frame and compass for that minimap, over the hotbar's HUD layer (API 139).
 [[injection]]
 id = "hud"
 kind = "HEAD"
