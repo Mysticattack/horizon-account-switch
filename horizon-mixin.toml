@@ -1,6 +1,6 @@
 [mod]
 id = "account_switch"
-version = "0.26.0"
+version = "0.27.0"
 priority = 100
 
 # The commit this bundle was written and built against. `horizon-launcher
@@ -148,6 +148,27 @@ bindings = [
   { name = "screen", ty = "&crate::mod_api::NativeScreenView<'_>", value = "&*screen" },
   { name = "scroll", ty = "[f64; 2]", value = "scroll" },
   { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+# The /wp chat command, and its name for the chat box.
+[[injection]]
+id = "command"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_command"
+helper = "command.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "command", ty = "&str", value = "command" },
+  { name = "ran", ty = "&mut bool", value = "&mut *ran" },
+]
+
+[[injection]]
+id = "commands"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_commands"
+helper = "commands.rs"
+bindings = [
+  { name = "commands", ty = "&mut Vec<&'static str>", value = "&mut *commands" },
 ]
 
 # The name window: its characters and its keys.

@@ -29,7 +29,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.26.0";
+pub const VERSION: &str = "0.27.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -1062,6 +1062,21 @@ fn save_map(game: &crate::game::Game<'_>) {
         }
     }
     let _ = std::fs::write(&path, bytes);
+    // Keep the folder from growing for ever: sixty-four worlds is plenty.
+    if let Some(dir) = path.parent()
+        && let Ok(entries) = std::fs::read_dir(dir)
+    {
+        let mut maps: Vec<_> = entries
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|kind| kind == "map"))
+            .collect();
+        if maps.len() > 64 {
+            maps.sort_by_key(|entry| entry.metadata().and_then(|meta| meta.modified()).ok());
+            for entry in maps.iter().take(maps.len() - 64) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 /// Reads a world's map back, if there is one.
@@ -1298,12 +1313,26 @@ pub(super) fn explore(game: &mut crate::game::Game<'_>) {
                 let block = world.block(x, surface - 1, z);
                 let entry = facts.states.get(block.0 as usize);
                 let colour = entry.map_or(0, |state| state.map_color);
+                // Water: show the floor beneath it, as a shallow pond looks.
+                let mut base = map_pixel(colour, surface);
+                if entry.is_some_and(|state| state.name.contains("water")) {
+                    let floor = world.block(x, surface - 3, z);
+                    let floor_colour = facts
+                        .states
+                        .get(floor.0 as usize)
+                        .map_or(0, |state| state.map_color);
+                    base = logic::blend(
+                        base,
+                        map_pixel(floor_colour, surface - 3),
+                        0.55,
+                    );
+                }
                 // Shade once, here, and store the finished colour: doing it per
                 // frame for every cell is what costs frames.
                 let north = seen(&state, x, z - 1);
                 let west = seen(&state, x - 1, z);
                 let shaded = logic::relief(
-                    logic::cell_rgb(map_pixel(colour, surface)),
+                    logic::cell_rgb(base),
                     surface,
                     (north != 0).then(|| logic::cell_height(north)),
                     (west != 0).then(|| logic::cell_height(west)),
@@ -1385,7 +1414,16 @@ fn draw_cells(
                 column += 1;
                 continue;
             }
-            let colour = logic::cell_rgb(seen(state, centre.0 + (column as i32 - half_column) * step, z));
+            let x0 = centre.0 + (column as i32 - half_column) * step;
+            let mut colour = logic::cell_rgb(seen(state, x0, z));
+            // Far out, average two samples so the picture does not turn into a
+            // pattern of single blocks.
+            if step >= 8 && colour != 0 {
+                let far = logic::cell_rgb(seen(state, x0 + step / 2, z + step / 2));
+                if far != 0 {
+                    colour = logic::blend(colour, far, 0.5);
+                }
+            }
             if colour == 0 {
                 column += 1;
                 continue;
@@ -1398,7 +1436,7 @@ fn draw_cells(
                     break;
                 }
                 let next = centre.0 + ((column + run) as i32 - half_column) * step;
-                if logic::cell_rgb(seen(state, next, z)) != colour {
+                if logic::cell_rgb(seen(state, next, z)) != colour || step >= 8 {
                     break;
                 }
                 run += 1;
@@ -1599,6 +1637,91 @@ fn draw_name(
         MUTED,
         true,
     );
+}
+
+/// The chat command `/wp`: waypoints by name, as the map pack has them.
+pub(super) fn command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut bool) {
+    let line = command.trim().trim_start_matches('/');
+    let mut words = line.split_whitespace();
+    if words.next() != Some("wp") {
+        return;
+    }
+    *ran = true;
+    let action = words.next().unwrap_or("help");
+    let rest: Vec<&str> = words.collect();
+    let answer = match action {
+        "add" => match player_center(game) {
+            Some((x, z)) => {
+                let name = if rest.is_empty() {
+                    format!("WP {}", state().waypoints.len() + 1)
+                } else {
+                    rest.join(" ")
+                };
+                let mut state = state();
+                state.waypoints.push((x, z, name.clone()));
+                format!("Waypoint {name} at {x}, {z}")
+            }
+            None => "No player position".to_string(),
+        },
+        "del" => {
+            let mut state = state();
+            let target = rest.first().and_then(|word| word.parse::<usize>().ok());
+            let removed = match target {
+                Some(number) if number >= 1 && number <= state.waypoints.len() => {
+                    Some(state.waypoints.remove(number - 1).2)
+                }
+                _ => {
+                    let named = rest.join(" ");
+                    let found = state
+                        .waypoints
+                        .iter()
+                        .position(|(_, _, name)| name.eq_ignore_ascii_case(&named));
+                    found.map(|index| state.waypoints.remove(index).2)
+                }
+            };
+            match removed {
+                Some(name) => format!("Waypoint {name} removed"),
+                None => "No such waypoint".to_string(),
+            }
+        }
+        "rename" => {
+            let number = rest.first().and_then(|word| word.parse::<usize>().ok());
+            let new_name = rest[1..].join(" ");
+            let mut state = state();
+            match number {
+                Some(number) if number >= 1 && number <= state.waypoints.len() && !new_name.is_empty() => {
+                    state.waypoints[number - 1].2 = new_name.clone();
+                    format!("Waypoint {number} is now {new_name}")
+                }
+                _ => "Use /wp rename <number> <name>".to_string(),
+            }
+        }
+        "list" => {
+            let state = state();
+            if state.waypoints.is_empty() {
+                "No waypoints in this world".to_string()
+            } else {
+                let mut text = String::from("Waypoints:");
+                for (index, (x, z, name)) in state.waypoints.iter().enumerate() {
+                    text.push_str(&format!("\n{}. {name} ({x}, {z})", index + 1));
+                }
+                text
+            }
+        }
+        "clear" => {
+            let mut state = state();
+            let count = state.waypoints.len();
+            state.waypoints.clear();
+            format!("{count} waypoints removed")
+        }
+        _ => "wp add [name] · wp del <number|name> · wp rename <number> <name> · wp list · wp clear".to_string(),
+    };
+    tell(answer);
+}
+
+/// The commands the chat box lists (`native_commands`' hook).
+pub(super) fn commands(commands: &mut Vec<&'static str>) {
+    commands.push("wp");
 }
 
 /// A character typed on the mod's name window
@@ -1837,6 +1960,16 @@ pub(super) fn on_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool)
         } else if game.native_mod_screen() == Some(ID) {
             game.native_mod_screen_close(ID);
         }
+        return;
+    }
+    // The pack's keys, too: I zooms the minimap in, O zooms it out.
+    if pressed && (key == "key.keyboard.i" || key == "key.keyboard.o") {
+        let mut state = state();
+        state.mini_bpp = if key == "key.keyboard.i" {
+            (state.mini_bpp / 2.0).clamp(0.5, 4.0)
+        } else {
+            (state.mini_bpp * 2.0).clamp(0.5, 4.0)
+        };
         return;
     }
     // The minimap's zoom: one key out, one key in.

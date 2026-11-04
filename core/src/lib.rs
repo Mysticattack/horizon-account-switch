@@ -371,6 +371,19 @@ pub fn jitter(x: i32, z: i32) -> u32 {
     value.wrapping_mul(0xC2B2_AE35) >> 7
 }
 
+/// `over` laid on `under`: water over the floor, so a shallow pond shows what
+/// lies beneath it instead of a flat blue square. `amount` is how much of
+/// `over` wins, nought to one.
+pub fn blend(over: u32, under: u32, amount: f32) -> u32 {
+    let amount = amount.clamp(0.0, 1.0);
+    let channel = |shift: u32| {
+        let a = ((over >> shift) & 0xFF) as f32;
+        let b = ((under >> shift) & 0xFF) as f32;
+        ((a * amount + b * (1.0 - amount)).min(255.0)) as u32
+    };
+    0xFF00_0000 | (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
+
 /// The side of one stored map tile, in blocks. The map keeps every block it
 /// has seen, so terrain stays on it after the chunk unloads.
 pub const TILE: i32 = 16;
@@ -711,6 +724,15 @@ mod tests {
         // Only the rows it was told about.
         let [_, below, _, _] = row(p, 4);
         assert_eq!(hit(p, 4, [x + 1.0, below + 1.0]), None);
+    }
+
+    #[test]
+    fn water_shows_the_floor_beneath_it() {
+        let water = blend(0x3060C0, 0x907040, 0.6);
+        let floor = blend(0x3060C0, 0x907040, 0.0);
+        assert_eq!(floor, 0xFF_90_70_40);
+        assert_ne!(water, floor);
+        assert!((water & 0xFF) > (water >> 8 & 0xFF));
     }
 
     #[test]
