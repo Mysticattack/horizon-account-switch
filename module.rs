@@ -1,4 +1,4 @@
-// Account Switch: play as another signed-in Horizon account without quitting.
+// Horizon Companion: play as another signed-in Horizon account without quitting.
 //
 // The launcher signs several Microsoft accounts in and hands the game one
 // session at start (`docs/microsoft-account.md`). `horizon-launcher account
@@ -14,7 +14,7 @@
 // enter. Options > Mods carries the same rows as the mod's settings page.
 // The logic that can be reasoned about without the game (what the launcher
 // prints, the next account, the screen's geometry) is the mod's own crate,
-// `horizon-account-switch-core`, with its tests.
+// `horizon-companion-core`, with its tests.
 use std::{
     collections::{BTreeMap, VecDeque},
     io::{BufRead, BufReader},
@@ -23,13 +23,13 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
-use horizon_account_switch_core as logic;
+use horizon_companion_core as logic;
 use horizon_client::auth::AuthSession;
 use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
-pub const ID: &str = "account_switch";
-pub const VERSION: &str = "0.30.0";
+pub const ID: &str = "horizon_companion";
+pub const VERSION: &str = "0.31.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -59,7 +59,7 @@ pub const WAYPOINT_DEL_DEFAULT: &str = "key.keyboard.backspace";
 pub const WAYPOINT_KEY: &str = "waypoint";
 pub const WAYPOINT_DEFAULT: &str = "key.keyboard.b";
 /// The screen's title.
-const TITLE: &str = "Account Switch";
+const TITLE: &str = "Horizon Companion";
 /// Frames to let the title come back before joining again.
 const RECONNECT_FRAMES: u32 = 2;
 
@@ -287,7 +287,7 @@ fn open_page(link: &str) {
         .spawn()
     {
         Ok(_) => {}
-        Err(error) => log::warn!("Account Switch: could not open {link}: {error}"),
+        Err(error) => log::warn!("Horizon Companion: could not open {link}: {error}"),
     }
 }
 
@@ -309,7 +309,7 @@ fn refresh_accounts() {
         match answer {
             Ok(accounts) => state.accounts = accounts,
             Err(error) => {
-                log::warn!("Account Switch: the account list failed: {error}");
+                log::warn!("Horizon Companion: the account list failed: {error}");
                 state.status = Some(error);
             }
         }
@@ -343,8 +343,8 @@ fn start_switch(who: String) {
                 state.fetched_for = Some(who);
             }
             Err(error) => {
-                log::warn!("Account Switch: no session for {who}: {error}");
-                tell(format!("Account Switch: {who} can't play: {error}"));
+                log::warn!("Horizon Companion: no session for {who}: {error}");
+                tell(format!("Horizon Companion: {who} can't play: {error}"));
                 let mut state = state();
                 state.busy = None;
                 state.status = Some(format!("{who}: {error}"));
@@ -416,11 +416,11 @@ fn add_account(target: Option<String>) {
             });
             finish_sign_in(match name {
                 Some(name) if already => {
-                    tell(format!("Account Switch: {name} is already signed in"));
+                    tell(format!("Horizon Companion: {name} is already signed in"));
                     format!("{name} is already signed in")
                 }
                 Some(name) => {
-                    tell(format!("Account Switch: {name} signed in"));
+                    tell(format!("Horizon Companion: {name} signed in"));
                     format!("{name} signed in")
                 }
                 None => "signed in".to_owned(),
@@ -525,13 +525,13 @@ pub(super) fn pump(game: &mut crate::game::Game<'_>) {
             }
         }
         game.system_message(horizon_client::text::Text::literal(if in_server {
-            format!("Account Switch: playing as {who}, joining the server again")
+            format!("Horizon Companion: playing as {who}, joining the server again")
         } else {
-            format!("Account Switch: playing as {who} from the next join on")
+            format!("Horizon Companion: playing as {who} from the next join on")
         }));
         if in_server {
             if let Err(error) = game.leave_server(None) {
-                log::warn!("Account Switch: leaving the server failed: {error}");
+                log::warn!("Horizon Companion: leaving the server failed: {error}");
             }
         }
     }
@@ -552,7 +552,7 @@ pub(super) fn pump(game: &mut crate::game::Game<'_>) {
     };
     if let Some((address, name)) = back {
         game.system_message(horizon_client::text::Text::literal(format!(
-            "Account Switch: joining {address} again"
+            "Horizon Companion: joining {address} again"
         )));
         let failure = game.connect_server(&address, &name).err();
         {
@@ -931,7 +931,7 @@ pub(super) fn clicked(
             {
                 let line = format!("{} is already signed in and playing", account.name);
                 set_status(line.clone());
-                tell(format!("Account Switch: {line}"));
+                tell(format!("Horizon Companion: {line}"));
                 return;
             }
             let ready = account.state.is_empty() || account.state == "ready";
@@ -999,7 +999,7 @@ pub(super) fn wheel(
 /// Shared waypoints travel as mod messages on this channel: a Horizon host
 /// passes them on, so two players with this mod need no plugin on any world it
 /// hosts. A message is `wp <x> <z> <name>` in UTF-8.
-const SHARE_CHANNEL: &str = "account_switch:map";
+const SHARE_CHANNEL: &str = "horizon_companion:map";
 
 /// A mod message from the server (`native_net_from_server`'s hook): a waypoint
 /// another player shared with us.
@@ -1075,7 +1075,26 @@ impl State {
     }
 }
 
-/// The file a world's map lives in: `horizon-mods/.horizon-mod-data/account_switch/`,
+/// The map and its waypoints used to live under another mod id: take the old
+/// files over once, so renaming the mod does not lose the explored map.
+fn migrate_data(game: &crate::game::Game<'_>) {
+    let new = game.native_data_dir(ID);
+    let old = game.native_data_dir("account_switch");
+    if new.exists() || !old.exists() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(&new);
+    if let Ok(entries) = std::fs::read_dir(&old) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name() {
+                let _ = std::fs::copy(&path, new.join(name));
+            }
+        }
+    }
+}
+
+/// The file a world's map lives in: `horizon-mods/.horizon-mod-data/horizon_companion/`,
 /// one per server and dimension, so the map is still there tomorrow.
 fn map_path(game: &crate::game::Game<'_>, key: &str) -> std::path::PathBuf {
     let safe: String = key
@@ -1308,6 +1327,7 @@ pub(super) fn explore(game: &mut crate::game::Game<'_>) {
     let Some(center) = player_center(game) else {
         return;
     };
+    migrate_data(game);
     // A death point, once per death.
     if let Some(player) = game.player.as_ref() {
         let dead = player.health.dead_or_dying();
@@ -1450,7 +1470,7 @@ pub(super) fn explore(game: &mut crate::game::Game<'_>) {
             save_waypoints(game);
         }
         if first {
-            tell(format!("Account Switch map: {loaded} blocks in reach seen"));
+            tell(format!("Horizon Companion map: {loaded} blocks in reach seen"));
         }
     }
 }
@@ -2196,7 +2216,7 @@ pub(super) fn zoom_wheel(steps: f32, claimed: &mut bool) {
 pub(super) fn listed(mods: &mut Vec<crate::game::native_hooks::NativeMod>) {
     mods.push(crate::game::native_hooks::NativeMod {
         id: ID.to_owned(),
-        title: format!("Account Switch {VERSION}"),
+        title: format!("Horizon Companion {VERSION}"),
         description: DESCRIPTION.to_owned(),
         keys: vec![
             [
@@ -2343,7 +2363,7 @@ pub(super) fn clicked_page(game: &mut crate::game::Game<'_>, mod_id: &str, butto
         };
         drop(state);
         game.system_message(horizon_client::text::Text::literal(format!(
-            "Account Switch: {line}"
+            "Horizon Companion: {line}"
         )));
         return;
     }
@@ -2352,7 +2372,7 @@ pub(super) fn clicked_page(game: &mut crate::game::Game<'_>, mod_id: &str, butto
     };
     if let Some((who, _)) = &view.busy {
         game.system_message(horizon_client::text::Text::literal(format!(
-            "Account Switch: still switching to {who}"
+            "Horizon Companion: still switching to {who}"
         )));
         return;
     }
@@ -2361,7 +2381,7 @@ pub(super) fn clicked_page(game: &mut crate::game::Game<'_>, mod_id: &str, butto
         Action::Refresh => {
             refresh_accounts();
             game.system_message(horizon_client::text::Text::literal(
-                "Account Switch: reading the launcher's accounts",
+                "Horizon Companion: reading the launcher's accounts",
             ));
         }
         Action::Switch(at) => {
@@ -2374,7 +2394,7 @@ pub(super) fn clicked_page(game: &mut crate::game::Game<'_>, mod_id: &str, butto
                 .is_some_and(|name| name.eq_ignore_ascii_case(&account.name))
             {
                 game.system_message(horizon_client::text::Text::literal(format!(
-                    "Account Switch: {} is already signed in and playing",
+                    "Horizon Companion: {} is already signed in and playing",
                     account.name
                 )));
                 return;
@@ -2383,7 +2403,7 @@ pub(super) fn clicked_page(game: &mut crate::game::Game<'_>, mod_id: &str, butto
             if ready {
                 start_switch(account.name.clone());
                 game.system_message(horizon_client::text::Text::literal(format!(
-                    "Account Switch: switching to {}",
+                    "Horizon Companion: switching to {}",
                     account.name
                 )));
             } else {

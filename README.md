@@ -1,4 +1,4 @@
-# Account Switch — a native Horizon mod
+# Horizon Companion — a native Horizon mod
 
 Switch the Minecraft account you play as, without quitting the game.
 
@@ -7,13 +7,13 @@ Switch the Minecraft account you play as, without quitting the game.
 Das Repo ist das fertige Bundle. Horizon baut native Mods lokal, also klonen und bauen:
 
 ```sh
-git clone https://github.com/Mysticattack/horizon-account-switch.git
-horizon-launcher native-build horizon-account-switch --trust-native-code
+git clone https://github.com/Mysticattack/horizon-companion.git
+horizon-launcher native-build horizon-companion --trust-native-code
 ```
 
 Der erste Build lädt Rust und kompiliert das Spiel (20–30 Minuten), später geht es schneller.
 Danach die Instanz starten, die er gebaut hat, und im Spiel **F9** drücken (Taste änderbar unter
-Options → Mods → Account Switch): es öffnet sich ein Fenster mit einer Zeile pro eingeloggtem
+Options → Mods → Horizon Companion): es öffnet sich ein Fenster mit einer Zeile pro eingeloggtem
 Account — anklicken, fertig. Die Zeile **+ Add account** startet eine Microsoft-Anmeldung, **öffnet
 die Anmeldeseite im Browser und legt den Code in die Zwischenablage** (Zeile `Copy code …` kopiert
 ihn noch einmal), danach steht der neue Account in der Liste. **Esc** schließt.
@@ -37,8 +37,8 @@ on, the session service's join, the profile, the skins and the chat keys belong 
   signed-in account (`Play as <name>`, `Refresh list`), **+ Add account** for a Microsoft sign-in, and
   the sign-in's code and link right there. Escape closes it. The sign-in's page opens in the browser
   and its code is put on the clipboard, ready to paste; `Copy code …` copies it again.
-- **Options → Mods → Account Switch** carries the same rows as a settings page.
-- Chat says what is happening (`Account Switch: playing as …`, `joining <server> again`).
+- **Options → Mods → Horizon Companion** carries the same rows as a settings page.
+- Chat says what is happening (`Horizon Companion: playing as …`, `joining <server> again`).
 
 Switching costs one reconnect (a second or two): the server sees a different player, so a fresh login is the only
 honest way. You can't play two accounts in one game.
@@ -101,15 +101,15 @@ horizon-launcher native-build /path/to/account-switch --trust-native-code
 
 Native mods run with your user's rights and are not sandboxed; that is what the trust flag is about. The first build
 downloads Rust and compiles the game (20–30 minutes); later builds are faster. Then start the instance it built and
-open **Options → Mods → Account Switch**.
+open **Options → Mods → Horizon Companion**.
 
 ## How it works
 
 | File | What |
 | --- | --- |
 | `horizon-mixin.toml` | the bundle: 8 injections, 2 support modules, 1 crate |
-| `module.rs` | `crate::game::account_switch`: the launcher calls, the state, the frame/key/settings hooks |
-| `slot.rs` | `crate::auth::account_switch`: the session the game plays as |
+| `module.rs` | `crate::game::horizon_companion`: the launcher calls, the state, the frame/key/settings hooks |
+| `slot.rs` | `crate::auth::horizon_companion`: the session the game plays as |
 | `set_current.rs`, `current.rs` | `auth::set_current` installs the session there, `auth::current` answers with it (cancellable HEAD: the original one-shot static is only used while no session is installed) |
 | `frame.rs` | once a frame: install a fetched session, leave the server, join it again |
 | `key.rs`, `mods.rs`, `settings.rs`, `click.rs` | the key, the Options → Mods row and its page |

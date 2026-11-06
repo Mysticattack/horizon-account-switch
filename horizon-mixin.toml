@@ -1,6 +1,6 @@
 [mod]
-id = "account_switch"
-version = "0.30.0"
+id = "horizon_companion"
+version = "0.31.0"
 priority = 100
 
 # The commit this bundle was written and built against. `horizon-launcher
@@ -15,19 +15,19 @@ id = "core"
 path = "core"
 dependent = "horizon-client"
 
-# The game-side module: `crate::game::account_switch`.
+# The game-side module: `crate::game::horizon_companion`.
 [[module]]
 id = "module"
 file = "crates/horizon-client/src/game.rs"
-name = "account_switch"
+name = "horizon_companion"
 source = "module.rs"
 
-# The session the game plays as lives in `crate::auth::account_switch`: the
+# The session the game plays as lives in `crate::auth::horizon_companion`: the
 # game's own at start, another account's after a switch.
 [[module]]
 id = "slot"
 file = "crates/horizon-client-render/src/auth.rs"
-name = "account_switch"
+name = "horizon_companion"
 source = "slot.rs"
 
 # `set_current` installs the session there instead of the one-shot static;

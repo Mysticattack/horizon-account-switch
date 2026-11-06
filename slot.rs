@@ -1,5 +1,5 @@
 // The account this game plays as: the one it was started with, or the one a
-// mid-game switch installed (the Account Switch mod). `set_current` and
+// mid-game switch installed (the Horizon Companion mod). `set_current` and
 // `current` hand the session through here, so every join, every profile call
 // and the chat keys follow the account that is actually playing.
 use std::sync::{Arc, Mutex, MutexGuard};

@@ -1,4 +1,4 @@
-//! The logic of Account Switch, apart from the game: what the Horizon launcher
+//! The logic of Horizon Companion, apart from the game: what the Horizon launcher
 //! prints about its accounts, which account comes next, and what the settings
 //! page shows. Everything here is testable without the game.
 //!
