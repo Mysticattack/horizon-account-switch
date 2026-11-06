@@ -29,7 +29,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "horizon_companion";
-pub const VERSION: &str = "0.32.0";
+pub const VERSION: &str = "0.32.1";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -1548,6 +1548,8 @@ fn draw_cells(
                 }
                 run += 1;
             }
+            // `cell_rgb` drops the top byte, so put the opaque alpha back:
+            // without it every rect is drawn fully transparent.
             host.fill(
                 batch,
                 [
@@ -1556,7 +1558,7 @@ fn draw_cells(
                     cell_width * run as f32 + 0.5,
                     cell_height + 0.5,
                 ],
-                colour,
+                logic::cell_colour(colour),
             );
             drawn += run as usize;
             column += run;

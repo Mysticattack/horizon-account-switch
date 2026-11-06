@@ -359,6 +359,12 @@ pub fn cell_height(packed: u32) -> i32 {
     (packed >> 24) as i32 - 64
 }
 
+/// The drawable colour of a packed cell: the same colour, but always opaque.
+/// `cell_rgb` drops the top byte, and a rect filled with that is invisible.
+pub fn cell_colour(packed: u32) -> u32 {
+    0xFF00_0000 | (packed & 0x00FF_FFFF)
+}
+
 /// The colour back out of a packed cell.
 pub fn cell_rgb(packed: u32) -> u32 {
     packed & 0x00FF_FFFF
@@ -724,6 +730,13 @@ mod tests {
         // Only the rows it was told about.
         let [_, below, _, _] = row(p, 4);
         assert_eq!(hit(p, 4, [x + 1.0, below + 1.0]), None);
+    }
+
+    #[test]
+    fn a_drawn_cell_is_never_transparent() {
+        let packed = pack_cell(0x70A040, 63);
+        assert_eq!(cell_colour(packed), 0xFF_70_A0_40);
+        assert_eq!(cell_colour(packed) >> 24, 0xFF);
     }
 
     #[test]
