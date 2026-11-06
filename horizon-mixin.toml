@@ -1,6 +1,6 @@
 [mod]
 id = "horizon_companion"
-version = "0.31.0"
+version = "0.31.1"
 priority = 100
 
 # The commit this bundle was written and built against. `horizon-launcher

@@ -20,7 +20,7 @@ use std::{
     io::{BufRead, BufReader},
     path::PathBuf,
     process::{Command, Stdio},
-    sync::{Mutex, MutexGuard},
+    sync::{Mutex, MutexGuard, atomic::{AtomicBool, Ordering}},
 };
 
 use horizon_companion_core as logic;
@@ -29,7 +29,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "horizon_companion";
-pub const VERSION: &str = "0.31.0";
+pub const VERSION: &str = "0.31.1";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -221,6 +221,9 @@ static STATE: Mutex<State> = Mutex::new(State {
 /// Messages for the next frame: the launcher threads can't reach the game.
 static TELL: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// The one state. Never take it twice on one thread — that deadlocks the game
+/// — so helpers that run under it take `&State`/`&mut State` instead, and
+/// anything needed while it is held (like the language) lives outside it.
 fn state() -> MutexGuard<'static, State> {
     STATE
         .lock()
@@ -1035,9 +1038,13 @@ pub(super) fn shared(_game: &mut crate::game::Game<'_>, channel: &str, data: &[u
     tell(format!("Waypoint {name} shared with you ({x}, {z})"));
 }
 
+/// The map's language, readable without taking the state lock: `t` is called
+/// from places that already hold it, and locking again there deadlocks.
+static LANG_EN: AtomicBool = AtomicBool::new(false);
+
 /// A text in the player's language: German unless English is chosen.
 fn t(de: &str, en: &str) -> String {
-    if state().lang_en {
+    if LANG_EN.load(Ordering::Relaxed) {
         en.to_string()
     } else {
         de.to_string()
@@ -2341,6 +2348,7 @@ pub(super) fn clicked_page(game: &mut crate::game::Game<'_>, mod_id: &str, butto
             }
             5 => {
                 state.lang_en = !state.lang_en;
+                LANG_EN.store(state.lang_en, Ordering::Relaxed);
                 format!(
                     "language: {}",
                     if state.lang_en { "English" } else { "Deutsch" }
