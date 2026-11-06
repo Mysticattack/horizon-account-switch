@@ -1,8 +1,8 @@
-// The HUD's layers, after one has drawn: the minimap goes over the hotbar's.
+// Coordinates under the minimap, placed on the engine's own corner stack.
 fn horizon_companion_hud(
     game: &crate::game::Game<'_>,
-    layer: &str,
     batch: &mut crate::hud::HudBatch,
+    corners: &mut horizon_client::extras_hud::Corners,
 ) {
-    crate::game::horizon_companion::hud_post(game, layer, batch);
+    crate::game::horizon_companion::hud_post(game, batch, corners);
 }

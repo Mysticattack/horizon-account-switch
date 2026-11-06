@@ -29,7 +29,7 @@ use horizon_client::clipboard::Clipboard;
 
 /// The mod's id: its settings folder, its row, its key's line and its screen.
 pub const ID: &str = "horizon_companion";
-pub const VERSION: &str = "0.31.1";
+pub const VERSION: &str = "0.32.0";
 pub const DESCRIPTION: &str =
     "Play as another signed-in Horizon account: press the key, pick one, or add an account with your \
      Microsoft sign-in (the code is copied and the page opens). The game leaves the server and joins it \
@@ -164,6 +164,10 @@ struct State {
     minimap_round: bool,
     minimap_rotate: bool,
     coords_on: bool,
+    /// How many cells the map drew last frame, and what the centre cell holds:
+    /// the two numbers that tell a store from a drawing fault.
+    drawn: usize,
+    centre_cell: u32,
     /// The build said what it found, once.
     map_said: bool,
     /// What the last build found, for the map screen's own line.
@@ -209,10 +213,12 @@ static STATE: Mutex<State> = Mutex::new(State {
     name_text: String::new(),
     name_at: (0, 0),
     lang_en: false,
-    minimap_size: logic::MINIMAP,
+    minimap_size: 72.0,
     minimap_round: true,
     minimap_rotate: false,
     coords_on: true,
+    drawn: 0,
+    centre_cell: 0,
     map_said: false,
     map_debug: String::new(),
     corner: 1,
@@ -483,7 +489,9 @@ pub(super) fn pump(game: &mut crate::game::Game<'_>) {
             state().map_open = false;
         }
     }
-    if game.native_playing() {
+    // Sampling runs while playing and while the world map is open, so opening
+    // it fills what is missing instead of showing a hole.
+    if game.native_playing() || state().map_open {
         explore(game);
     }
     let first = {
@@ -1371,9 +1379,9 @@ pub(super) fn explore(game: &mut crate::game::Game<'_>) {
     // seen are sampled, so walking costs a strip instead of the whole square.
     let full = {
         let state = state();
-        state
-            .explored_full
-            .map_or(true, |at| at.elapsed().as_secs() >= 2)
+        // Opening the map refreshes everything, so a gap in the store is filled
+        // the moment it would be seen.
+        state.map_open || state.explored_full.map_or(true, |at| at.elapsed().as_secs() >= 2)
     };
     let started = std::time::Instant::now();
     let head = player_head(game);
@@ -1496,13 +1504,14 @@ fn draw_cells(
     cols: u32,
     rows: u32,
     round: bool,
-) {
+) -> usize {
     let [x, y, width, height] = area;
     let cell_width = width / cols as f32;
     let cell_height = height / rows as f32;
     let half_column = (cols / 2) as i32;
     let half_row = (rows / 2) as i32;
     let step = zoom.max(1) as i32;
+    let mut drawn = 0usize;
     for row in 0..rows {
         let top = y + row as f32 * cell_height + offset[1];
         let z = centre.1 + (row as i32 - half_row) * step;
@@ -1549,9 +1558,11 @@ fn draw_cells(
                 ],
                 colour,
             );
+            drawn += run as usize;
             column += run;
         }
     }
+    drawn
 }
 
 /// The player's arrow, as Xaero's minimap has it: a triangle turned to where
@@ -1619,82 +1630,8 @@ pub(super) fn minimap(
 
 /// The round minimap in its corner, over the hotbar's HUD layer
 /// (`native_gui_layer_post`, API 139), as Xaero's Minimap has it.
-pub(super) fn hud_post(
-    game: &crate::game::Game<'_>,
-    layer: &str,
-    batch: &mut crate::hud::HudBatch,
-) {
-    // The game names its layers with the namespace: `minecraft:hotbar`.
-    if !(layer == "minecraft:hotbar" || layer == "hotbar") || !game.native_playing() {
-        return;
-    }
-    let state = state();
-    if !state.minimap_on {
-        return;
-    }
-    let Some(player) = game.player.as_ref() else {
-        return;
-    };
-    let host: &dyn crate::mod_api::Host = game;
-    let side = state.minimap_size;
-    let at = logic::minimap_at([batch.width, batch.height], state.corner, side);
-    // The game draws the map itself; this is the frame around it, the compass
-    // letters, and the coordinates underneath.
-    for square in logic::ring(side + 4.0, 3.0, 96) {
-        host.fill(
-            batch,
-            [at[0] - 2.0 + square[0], at[1] - 2.0 + square[1], square[2], square[3]],
-            0xFF_1A_1A_20,
-        );
-    }
-    for square in logic::ring(side, 2.0, 96) {
-        host.fill(
-            batch,
-            [at[0] + square[0], at[1] + square[1], square[2], square[3]],
-            0xFF_C8_C8_D4,
-        );
-    }
-    for (letter, position) in logic::compass(side) {
-        let width = game.native_text_width(letter);
-        host.text(
-            batch,
-            letter,
-            [at[0] + position[0] - width / 2.0 + 2.0, at[1] + position[1]],
-            0xFF_FF_FF_FF,
-            true,
-        );
-    }
-    // Waypoints on the disc, pinned to the edge when they are out of reach.
-    let radius = side / 2.0;
-    for waypoint in &state.waypoints {
-        let dx = (waypoint.0 as f64 - player.position.x) as f32 / state.mini_bpp;
-        let dz = (waypoint.1 as f64 - player.position.z) as f32 / state.mini_bpp;
-        let distance = (dx * dx + dz * dz).sqrt();
-        let limit = radius - 3.0;
-        let (px, py) = if distance > limit && distance > 0.0 {
-            (at[0] + radius + dx / distance * limit, at[1] + radius + dz / distance * limit)
-        } else {
-            (at[0] + radius + dx, at[1] + radius + dz)
-        };
-        draw_waypoint(host, batch, [px, py], 4.0);
-    }
-    if !state.coords_on {
-        return;
-    }
-    let line = logic::coords(
-        player.position.x.floor() as i32,
-        player.position.y.floor() as i32,
-        player.position.z.floor() as i32,
-    );
-    let width = game.native_text_width(&line);
-    let left = at[0] + side / 2.0 - width / 2.0 - 3.0;
-    let top = at[1] + side + 7.0;
-    host.fill(batch, [left, top, width + 6.0, 12.0], 0xC0_08_08_0C);
-    host.text(batch, &line, [left + 3.0, top + 2.0], 0xFF_FF_FF_FF, true);
-}
-
-/// The name window: one line of text, the waypoint's place, and what the keys
-/// do. Enter saves, Escape cancels.
+/// The name window: one line of text, where the waypoint goes, and what the
+/// keys do. Enter saves, Escape cancels.
 fn draw_name(
     game: &crate::game::Game<'_>,
     batch: &mut crate::hud::HudBatch,
@@ -1745,7 +1682,54 @@ fn draw_name(
     );
 }
 
-/// The chat command `/wp`: waypoints by name, as the map pack has them.
+/// A character typed on the mod's name window
+/// (`native_screen_char_typed_pre`): the waypoint's name.
+pub(super) fn typed(c: char, canceled: &mut bool) {
+    let mut state = state();
+    if !state.name_open {
+        return;
+    }
+    *canceled = true;
+    if c.is_control() || state.name_text.chars().count() >= 24 {
+        return;
+    }
+    state.name_text.push(c);
+}
+
+/// A key on the mod's name window (`native_screen_key_pressed_pre`): Enter
+/// saves, Escape cancels, Backspace takes a character back.
+pub(super) fn screen_key(key: &str, canceled: &mut bool) {
+    let mut state = state();
+    if !state.name_open {
+        return;
+    }
+    *canceled = true;
+    match key {
+        "key.keyboard.enter" | "key.keyboard.keypad.enter" => {
+            let name = if state.name_text.trim().is_empty() {
+                format!("WP {}", state.waypoints.len() + 1)
+            } else {
+                state.name_text.trim().to_string()
+            };
+            let at = state.name_at;
+            state.waypoints.push((at.0, at.1, name.clone()));
+            state.name_open = false;
+            state.name_text.clear();
+            drop(state);
+            tell(format!("Waypoint {name} set"));
+        }
+        "key.keyboard.escape" => {
+            state.name_open = false;
+            state.name_text.clear();
+        }
+        "key.keyboard.backspace" => {
+            state.name_text.pop();
+        }
+        _ => {}
+    }
+}
+
+/// The chat command `/wp`: waypoints by name.
 pub(super) fn command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut bool) {
     let line = command.trim().trim_start_matches('/');
     let mut words = line.split_whitespace();
@@ -1795,7 +1779,9 @@ pub(super) fn command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut
             let new_name = rest[1..].join(" ");
             let mut state = state();
             match number {
-                Some(number) if number >= 1 && number <= state.waypoints.len() && !new_name.is_empty() => {
+                Some(number)
+                    if number >= 1 && number <= state.waypoints.len() && !new_name.is_empty() =>
+                {
                     state.waypoints[number - 1].2 = new_name.clone();
                     format!("Waypoint {number} is now {new_name}")
                 }
@@ -1848,8 +1834,8 @@ pub(super) fn command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut
             format!("{count} waypoints removed")
         }
         _ => t(
-            "wp add [Name] · wp del <Nummer|Name> · wp rename <Nummer> <Name> · wp share <Nummer> <Spieler> · wp list · wp clear",
-            "wp add [name] · wp del <number|name> · wp rename <number> <name> · wp share <number> <player> · wp list · wp clear",
+            "wp add [Name] · wp del <Nummer|Name> · wp rename <Nummer> <Name> · wp share <Nummer> · wp list · wp clear",
+            "wp add [name] · wp del <number|name> · wp rename <number> <name> · wp share <number> · wp list · wp clear",
         ),
     };
     tell(answer);
@@ -1860,51 +1846,34 @@ pub(super) fn commands(commands: &mut Vec<&'static str>) {
     commands.push("wp");
 }
 
-/// A character typed on the mod's name window
-/// (`native_screen_char_typed_pre`): the waypoint's name.
-pub(super) fn typed(c: char, canceled: &mut bool) {
-    let mut state = state();
-    if !state.name_open {
+pub(super) fn hud_post(
+    game: &crate::game::Game<'_>,
+    batch: &mut crate::hud::HudBatch,
+    corners: &mut horizon_client::extras_hud::Corners,
+) {
+    // The game draws the minimap itself and has already reserved its place in
+    // this corner, so the coordinates go on the next free spot underneath.
+    if !game.native_playing() {
         return;
     }
-    *canceled = true;
-    if c.is_control() || state.name_text.chars().count() >= 24 {
+    let state = state();
+    if !state.minimap_on || !state.coords_on {
         return;
     }
-    state.name_text.push(c);
-}
-
-/// A key on the mod's name window (`native_screen_key_pressed_pre`): Enter
-/// saves, Escape cancels, Backspace takes a character back.
-pub(super) fn screen_key(key: &str, canceled: &mut bool) {
-    let mut state = state();
-    if !state.name_open {
+    let Some(player) = game.player.as_ref() else {
         return;
-    }
-    *canceled = true;
-    match key {
-        "key.keyboard.enter" | "key.keyboard.keypad.enter" => {
-            let name = if state.name_text.trim().is_empty() {
-                format!("WP {}", state.waypoints.len() + 1)
-            } else {
-                state.name_text.trim().to_string()
-            };
-            let at = state.name_at;
-            state.waypoints.push((at.0, at.1, name.clone()));
-            state.name_open = false;
-            state.name_text.clear();
-            drop(state);
-            tell(format!("Waypoint {name} set"));
-        }
-        "key.keyboard.escape" => {
-            state.name_open = false;
-            state.name_text.clear();
-        }
-        "key.keyboard.backspace" => {
-            state.name_text.pop();
-        }
-        _ => {}
-    }
+    };
+    let host: &dyn crate::mod_api::Host = game;
+    let line = logic::coords(
+        player.position.x.floor() as i32,
+        player.position.y.floor() as i32,
+        player.position.z.floor() as i32,
+    );
+    let width = game.native_text_width(&line) + 6.0;
+    let corner = crate::extras::Corner::ALL[state.corner % crate::extras::Corner::ALL.len()];
+    let (x, y) = corners.place(corner, width, 12.0);
+    host.fill(batch, [x, y, width, 12.0], 0xB0_08_08_0C);
+    host.text(batch, &line, [x + 3.0, y + 2.0], 0xFF_FF_FF_FF, true);
 }
 
 /// Dragging on the mod's own screen pans the world map by the mouse's own
@@ -1951,7 +1920,7 @@ fn draw_map(
     ];
     host.fill(batch, [0.0, 0.0, window[0], window[1]], 0xFF_05_05_08);
     let area = map_area(window);
-    let state = state();
+    let mut state = state();
     let zoom = state.map_zoom.max(1);
     let (cols, rows) = big_cells();
     let cell = area[2] / cols as f32;
@@ -1967,9 +1936,12 @@ fn draw_map(
             ]
         })
         .unwrap_or([0.0, 0.0]);
-    draw_cells(
+    let drawn = draw_cells(
         host, batch, area, &state, middle, offset, zoom, cols, rows, false,
     );
+    let centre_cell = seen(&state, middle.0, middle.1);
+    state.drawn = drawn;
+    state.centre_cell = centre_cell;
     // The player, where they really are on the map.
     let me = [
         area[0] + area[2] / 2.0 + offset[0] - state.pan.0 as f32 * cell / zoom as f32,
@@ -2051,10 +2023,14 @@ fn draw_map(
         0xFF_FF_FF_FF,
         true,
     );
-    let debug = state.map_debug.clone();
-    if !debug.is_empty() {
-        host.text(batch, &debug, [6.0, 18.0], CODE, true);
-    }
+    let debug = format!(
+        "{}  ·  drawn {}/{}  ·  centre cell {:08X}",
+        state.map_debug,
+        state.drawn,
+        (cols * rows) as usize,
+        state.centre_cell
+    );
+    host.text(batch, &debug, [6.0, 18.0], CODE, true);
 }
 
 pub(super) fn on_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {

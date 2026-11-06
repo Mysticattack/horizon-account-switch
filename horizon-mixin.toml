@@ -1,6 +1,6 @@
 [mod]
 id = "horizon_companion"
-version = "0.31.1"
+version = "0.32.0"
 priority = 100
 
 # The commit this bundle was written and built against. `horizon-launcher
@@ -236,16 +236,17 @@ bindings = [
   { name = "minimap", ty = "&mut Option<crate::game::native_hooks::NativeMinimap>", value = "&mut *minimap" },
 ]
 
-# Coordinates, frame and compass for that minimap, over the hotbar's HUD layer (API 139).
+# Coordinates under that minimap: the engine's own corner stack says where it
+# put the map, so the plate lands underneath instead of guessing.
 [[injection]]
 id = "hud"
 kind = "HEAD"
-target = "horizon_client::game::native_hooks::Game<'_>::native_gui_layer_post"
+target = "horizon_client::game::native_hooks::Game<'_>::native_hud"
 helper = "hud.rs"
 bindings = [
   { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
-  { name = "layer", ty = "&str", value = "layer" },
   { name = "batch", ty = "&mut crate::hud::HudBatch", value = "&mut *batch" },
+  { name = "corners", ty = "&mut horizon_client::extras_hud::Corners", value = "&mut *corners" },
 ]
 
 # Every server join keeps its address, for the switch to join it again.
